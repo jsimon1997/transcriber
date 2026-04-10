@@ -14,6 +14,13 @@ from youtube_transcript_api import (
 
 logger = logging.getLogger(__name__)
 
+SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
+_PROXIES = (
+    {"http": f"http://scraperapi:{SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001",
+     "https": f"http://scraperapi:{SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001"}
+    if SCRAPER_API_KEY else None
+)
+
 
 @dataclass
 class TranscriptResult:
@@ -115,7 +122,7 @@ def transcribe_youtube(url: str) -> TranscriptResult:
 
     logger.info("Fetching captions...")
     try:
-        entries = YouTubeTranscriptApi.get_transcript(video_id)
+        entries = YouTubeTranscriptApi.get_transcript(video_id, proxies=_PROXIES)
         logger.info("Captions found.")
         segments = [{"start": e["start"], "text": e["text"]} for e in entries]
         return TranscriptResult(
