@@ -138,21 +138,76 @@ def _fetch_captions_via_scraper(video_id: str) -> list:
     if not caption_url:
         raise RuntimeError("Caption URL not found in track data.")
 
-    # Step 3: Fetch the captions XML via ScraperAPI
-    logger.info("Fetching caption XML...")
-    xml_text = _scraper_fetch(caption_url)
+    # Step 3: Fetch the captions — try direct first, then ScraperAPI
+    logger.info(f"Fetching captions from: {caption_url[:80]}...")
 
-    # Step 4: Parse XML into segments
-    root = ElementTree.fromstring(xml_text)
+    # Add JSON format for easier parsing
+    json_url = caption_url + ("&" if "?" in caption_url else "?") + "fmt=json3"
+
     segments = []
-    for elem in root.findall(".//text"):
-        start = float(elem.get("start", 0))
-        text = unescape(elem.text or "")
-        if text.strip():
-            segments.append({"start": start, "text": text})
+
+    # Try direct fetch first (timedtext API is often not blocked)
+    for fetch_url, fmt in [(json_url, "json"), (caption_url, "xml")]:
+        try:
+            resp = requests.get(fetch_url, timeout=15)
+            resp.raise_for_status()
+            content = resp.text.strip()
+            if not content:
+                continue
+
+            if fmt == "json":
+                data = json.loads(content)
+                for event in data.get("events", []):
+                    start_ms = event.get("tStartMs", 0)
+                    segs = event.get("segs", [])
+                    text = "".join(s.get("utf8", "") for s in segs).strip()
+                    if text and text != "\n":
+                        segments.append({"start": start_ms / 1000.0, "text": text})
+            else:
+                root = ElementTree.fromstring(content)
+                for elem in root.findall(".//text"):
+                    start = float(elem.get("start", 0))
+                    text = unescape(elem.text or "").strip()
+                    if text:
+                        segments.append({"start": start, "text": text})
+
+            if segments:
+                break
+        except Exception as e:
+            logger.warning(f"Direct caption fetch ({fmt}) failed: {e}")
+
+    # If direct fetch failed, try via ScraperAPI
+    if not segments:
+        logger.info("Direct fetch failed, trying via ScraperAPI...")
+        for fetch_url, fmt in [(json_url, "json"), (caption_url, "xml")]:
+            try:
+                content = _scraper_fetch(fetch_url).strip()
+                if not content:
+                    continue
+
+                if fmt == "json":
+                    data = json.loads(content)
+                    for event in data.get("events", []):
+                        start_ms = event.get("tStartMs", 0)
+                        segs = event.get("segs", [])
+                        text = "".join(s.get("utf8", "") for s in segs).strip()
+                        if text and text != "\n":
+                            segments.append({"start": start_ms / 1000.0, "text": text})
+                else:
+                    root = ElementTree.fromstring(content)
+                    for elem in root.findall(".//text"):
+                        start = float(elem.get("start", 0))
+                        text = unescape(elem.text or "").strip()
+                        if text:
+                            segments.append({"start": start, "text": text})
+
+                if segments:
+                    break
+            except Exception as e:
+                logger.warning(f"ScraperAPI caption fetch ({fmt}) failed: {e}")
 
     if not segments:
-        raise RuntimeError("Captions were found but contained no text.")
+        raise RuntimeError("Captions were found but could not be downloaded.")
 
     logger.info(f"Parsed {len(segments)} caption segments.")
     return segments
