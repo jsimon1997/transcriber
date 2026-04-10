@@ -272,117 +272,83 @@ def transcribe(req: TranscribeRequest):
 
 @app.get("/debug")
 def debug():
-    """Test: ScraperAPI page fetch + extract visitorData + innertube POST."""
-    import time, base64, json as json_mod, re as re_mod
+    """Test multiple strategies for getting YouTube captions."""
+    import time, re as re_mod
     from transcribe import SCRAPER_API_KEY
     import requests as req
+    import warnings
+    warnings.filterwarnings("ignore")
 
     video_id = "dQw4w9WgXcQ"
     results = {"video_id": video_id}
 
+    # --- Strategy A: ScraperAPI premium caption URL fetch ---
     try:
-        # Step 1: Fetch YouTube page via ScraperAPI to get context
         t0 = time.time()
-        page_resp = req.get("https://api.scraperapi.com/", params={
+        html = req.get("https://api.scraperapi.com/", params={
             "api_key": SCRAPER_API_KEY,
             "url": f"https://www.youtube.com/watch?v={video_id}",
-        }, timeout=60)
-        html = page_resp.text
-        results["page_time"] = round(time.time() - t0, 1)
-        results["page_len"] = len(html)
+        }, timeout=60).text
 
-        # Extract API key from page
-        api_key_match = re_mod.search(r'"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"', html)
-        api_key = api_key_match.group(1) if api_key_match else "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
-        results["api_key"] = api_key
+        match = re_mod.search(r'"captionTracks"\s*:\s*(\[.*?\])', html)
+        if match:
+            import json as j
+            tracks = j.loads(match.group(1))
+            cap_url = tracks[0].get("baseUrl", "").replace("\\u0026", "&")
 
-        # Extract visitor data
-        visitor_match = re_mod.search(r'"visitorData"\s*:\s*"([^"]+)"', html)
-        visitor_data = visitor_match.group(1) if visitor_match else ""
-        results["visitor_data"] = visitor_data[:30] + "..." if visitor_data else "(none)"
+            # Try premium=true for caption URL
+            t1 = time.time()
+            r1 = req.get("https://api.scraperapi.com/", params={
+                "api_key": SCRAPER_API_KEY,
+                "url": cap_url,
+                "premium": "true",
+            }, timeout=60)
+            c1 = r1.text.strip()
+            results["premium_caption"] = {"len": len(c1), "time": round(time.time() - t1, 1), "preview": c1[:200] if c1 else "(empty)"}
 
-        # Extract client version
-        cv_match = re_mod.search(r'"clientVersion"\s*:\s*"([^"]+)"', html)
-        client_version = cv_match.group(1) if cv_match else "2.20241120.01.00"
-        results["client_version"] = client_version
-
-        # Check for engagement panel transcript data in page
-        has_transcript_panel = "transcriptSearchPanelRenderer" in html
-        results["transcript_in_page"] = has_transcript_panel
-
-        if has_transcript_panel:
-            # Try to extract transcript directly from page HTML
-            # Look for transcriptSegmentListRenderer
-            seg_match = re_mod.search(r'"transcriptSegmentListRenderer"\s*:\s*\{', html)
-            results["segment_list_in_page"] = bool(seg_match)
-
-        # Build innertube params
-        vid = video_id.encode()
-        vid_field = b'\x0a' + bytes([len(vid)]) + vid
-        inner = vid_field + b'\x20\x00'
-        params = base64.b64encode(vid_field + b'\x12' + bytes([len(inner)]) + inner).decode()
-
-        # Step 2: Try innertube POST with extracted context
-        t1 = time.time()
-        innertube_resp = req.post(
-            f"https://www.youtube.com/youtubei/v1/get_transcript?key={api_key}&prettyPrint=false",
-            json={
-                "context": {
-                    "client": {
-                        "clientName": "WEB",
-                        "clientVersion": client_version,
-                        "hl": "en",
-                        "gl": "US",
-                        "visitorData": visitor_data,
-                    }
-                },
-                "params": params,
-            },
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Origin": "https://www.youtube.com",
-                "Referer": f"https://www.youtube.com/watch?v={video_id}",
-                "X-Youtube-Client-Name": "1",
-                "X-Youtube-Client-Version": client_version,
-            },
-            timeout=30,
-        )
-        results["innertube_status"] = innertube_resp.status_code
-        results["innertube_time"] = round(time.time() - t1, 1)
-        results["innertube_preview"] = innertube_resp.text[:500]
-
-        # Step 3: Try ScraperAPI POST to innertube
-        t2 = time.time()
-        try:
-            scraper_post_resp = req.post(
-                "https://api.scraperapi.com/",
-                params={
-                    "api_key": SCRAPER_API_KEY,
-                    "url": f"https://www.youtube.com/youtubei/v1/get_transcript?key={api_key}&prettyPrint=false",
-                },
-                json={
-                    "context": {
-                        "client": {
-                            "clientName": "WEB",
-                            "clientVersion": client_version,
-                            "hl": "en",
-                        }
-                    },
-                    "params": params,
-                },
-                headers={"Content-Type": "application/json"},
-                timeout=60,
-            )
-            results["scraper_post_status"] = scraper_post_resp.status_code
-            results["scraper_post_preview"] = scraper_post_resp.text[:500]
-        except Exception as e:
-            results["scraper_post_error"] = str(e)
-
+            # Try ultra_premium=true
+            t2 = time.time()
+            r2 = req.get("https://api.scraperapi.com/", params={
+                "api_key": SCRAPER_API_KEY,
+                "url": cap_url,
+                "ultra_premium": "true",
+            }, timeout=60)
+            c2 = r2.text.strip()
+            results["ultra_premium_caption"] = {"len": len(c2), "time": round(time.time() - t2, 1), "preview": c2[:200] if c2 else "(empty)"}
     except Exception as e:
-        results["error"] = str(e)
-        import traceback
-        results["traceback"] = traceback.format_exc()
+        results["caption_error"] = str(e)
+
+    # --- Strategy B: youtube-transcript-api with ScraperAPI proxy ---
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        t3 = time.time()
+        proxies = {
+            "https": f"http://scraperapi:{SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001"
+        }
+        # Monkey-patch to disable SSL verification
+        old_send = req.Session.send
+        def no_verify_send(self, prepared, **kwargs):
+            kwargs['verify'] = False
+            return old_send(self, prepared, **kwargs)
+        req.Session.send = no_verify_send
+        try:
+            entries = YouTubeTranscriptApi.get_transcript(video_id, proxies=proxies)
+            results["proxy_yt_api"] = {"segments": len(entries), "time": round(time.time() - t3, 1), "first": entries[0] if entries else None}
+        except Exception as e:
+            results["proxy_yt_api"] = {"error": str(e), "time": round(time.time() - t3, 1)}
+        finally:
+            req.Session.send = old_send
+    except Exception as e:
+        results["proxy_yt_api_error"] = str(e)
+
+    # --- Strategy C: youtube-transcript-api direct (no proxy) ---
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        t4 = time.time()
+        entries = YouTubeTranscriptApi.get_transcript(video_id)
+        results["direct_yt_api"] = {"segments": len(entries), "time": round(time.time() - t4, 1), "first": entries[0] if entries else None}
+    except Exception as e:
+        results["direct_yt_api"] = {"error": str(e)}
 
     return results
 
