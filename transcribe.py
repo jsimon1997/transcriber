@@ -401,53 +401,60 @@ def transcribe_youtube(url: str) -> TranscriptResult:
 # ---------------------------------------------------------------------------
 
 def _fetch_spotify_meta(url: str) -> dict:
-    """Fetch Spotify episode metadata via oEmbed API (works from any IP)."""
-    # Try oEmbed first (no JS required, works from cloud IPs)
-    try:
-        resp = requests.get(
-            "https://open.spotify.com/oembed",
-            params={"url": url},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        # oEmbed returns: title (episode name), provider_name ("Spotify")
-        # The title format is usually "Episode Name - Show Name" or just "Episode Name"
-        title = data.get("title", "")
-        # Try to split "Episode - Show" format
-        show_name = ""
-        if " - " in title:
-            parts = title.rsplit(" - ", 1)
-            if len(parts) == 2:
-                title, show_name = parts[0], parts[1]
-        if not show_name:
-            show_name = "Spotify Podcast"
-        return {"title": title, "show_name": show_name}
-    except Exception as e:
-        logger.warning(f"Spotify oEmbed failed: {e}")
+    """Fetch Spotify episode metadata.
 
-    # Fallback: scrape the page directly
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        )
-    }
-    try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.raise_for_status()
-        html = resp.text
-
+    Uses ScraperAPI if available (Spotify blocks direct access from cloud IPs),
+    falls back to direct fetch.
+    """
+    def _extract_meta(html: str) -> dict:
         def og(prop):
             m = re.search(rf'<meta property="og:{prop}" content="([^"]+)"', html)
             return m.group(1) if m else ""
 
         title = og("title")
         show_name = og("site_name") or "Spotify Podcast"
+
+        # Also try ld+json for richer metadata
+        ld_match = re.search(
+            r'<script type="application/ld\+json">(.*?)</script>', html, re.DOTALL
+        )
+        if ld_match:
+            try:
+                data = json.loads(ld_match.group(1))
+                title = data.get("name", title)
+                if "partOfSeries" in data:
+                    show_name = data["partOfSeries"].get("name", show_name)
+            except Exception:
+                pass
+
         return {"title": title, "show_name": show_name}
+
+    # Try ScraperAPI first (Spotify blocks cloud IPs)
+    if SCRAPER_API_KEY:
+        try:
+            logger.info("Fetching Spotify page via ScraperAPI...")
+            resp = requests.get(
+                "https://api.scraperapi.com/",
+                params={"api_key": SCRAPER_API_KEY, "url": url},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            meta = _extract_meta(resp.text)
+            if meta["title"]:
+                return meta
+            logger.warning("ScraperAPI returned empty Spotify metadata")
+        except Exception as e:
+            logger.warning(f"ScraperAPI Spotify fetch failed: {e}")
+
+    # Fallback: direct fetch
+    try:
+        resp = requests.get(url, headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        }, timeout=15)
+        resp.raise_for_status()
+        return _extract_meta(resp.text)
     except Exception as e:
-        logger.warning(f"Spotify page fetch failed: {e}")
+        logger.warning(f"Direct Spotify fetch failed: {e}")
         return {"title": "", "show_name": ""}
 
 
