@@ -4,3 +4,4 @@ pydantic==2.10.3
 python-dotenv==1.0.1
 youtube-transcript-api==0.6.3
 requests==2.32.3
+yt-dlp>=2024.1.0

@@ -272,35 +272,27 @@ def transcribe(req: TranscribeRequest):
 
 @app.get("/debug")
 def debug():
-    """Test caption fetching with session cookies."""
+    """Test yt-dlp caption extraction."""
     import time
-    from transcribe import _fetch_captions_with_session, _fetch_captions_via_scraper_session, SCRAPER_API_KEY
-    results = {"video_id": "dQw4w9WgXcQ", "scraper_key_set": bool(SCRAPER_API_KEY)}
+    from transcribe import _fetch_captions_ytdlp
+    results = {"video_id": "dQw4w9WgXcQ"}
 
-    # Test 1: Direct session with cookies
     try:
         t0 = time.time()
-        segs = _fetch_captions_with_session("dQw4w9WgXcQ")
-        results["direct_session"] = {
-            "segments": len(segs),
+        segments, title, channel, duration = _fetch_captions_ytdlp("dQw4w9WgXcQ")
+        results["ytdlp"] = {
+            "segments": len(segments),
+            "title": title,
+            "channel": channel,
+            "duration": duration,
             "time": round(time.time() - t0, 1),
-            "first": segs[0] if segs else None,
+            "first": segments[0] if segments else None,
+            "last": segments[-1] if segments else None,
         }
     except Exception as e:
-        results["direct_session"] = {"error": str(e), "time": 0}
-
-    # Test 2: ScraperAPI session
-    if SCRAPER_API_KEY:
-        try:
-            t1 = time.time()
-            segs2 = _fetch_captions_via_scraper_session("dQw4w9WgXcQ")
-            results["scraper_session"] = {
-                "segments": len(segs2),
-                "time": round(time.time() - t1, 1),
-                "first": segs2[0] if segs2 else None,
-            }
-        except Exception as e:
-            results["scraper_session"] = {"error": str(e)}
+        results["ytdlp"] = {"error": str(e)}
+        import traceback
+        results["traceback"] = traceback.format_exc()
 
     return results
 
