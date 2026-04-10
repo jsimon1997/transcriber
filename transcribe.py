@@ -490,7 +490,11 @@ def transcribe_spotify(url: str) -> TranscriptResult:
     show_name = meta["show_name"]
 
     if not title:
-        raise ValueError("Could not read episode info from Spotify.")
+        raise ValueError(
+            "Could not read episode info from Spotify. "
+            "Please check the URL is correct, or try pasting the YouTube URL directly "
+            "if this podcast is also on YouTube."
+        )
 
     yt_url = _search_youtube(f"{show_name} {title}")
     if not yt_url:

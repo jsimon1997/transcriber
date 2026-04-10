@@ -255,32 +255,6 @@ def index():
     return HTML
 
 
-@app.get("/debug-spotify")
-def debug_spotify():
-    """Diagnose Spotify flow step by step."""
-    import time
-    from transcribe import _fetch_spotify_meta, _search_youtube
-    results = {}
-    # Test oEmbed with The Joe Rogan Experience
-    test_url = "https://open.spotify.com/episode/4rOoJ6Egrf8K2IrywzwOMk"
-    try:
-        t0 = time.time()
-        meta = _fetch_spotify_meta(test_url)
-        results["spotify_meta"] = {"time": round(time.time() - t0, 1), "title": meta["title"], "show": meta["show_name"]}
-    except Exception as e:
-        results["spotify_meta"] = {"error": str(e)}
-    # Test YouTube search if we got a title
-    if meta.get("title"):
-        try:
-            t1 = time.time()
-            yt_url = _search_youtube(f"{meta['show_name']} {meta['title']}")
-            results["yt_search"] = {"time": round(time.time() - t1, 1), "url": yt_url}
-        except Exception as e:
-            results["yt_search"] = {"error": str(e)}
-    else:
-        results["yt_search"] = "skipped (no title)"
-    return results
-
 
 @app.post("/transcribe")
 def transcribe(req: TranscribeRequest):
