@@ -2,12 +2,12 @@ import json
 import logging
 import os
 import re
-import ssl
 from typing import Optional
 from dataclasses import dataclass
+from html import unescape
+from xml.etree import ElementTree
 
 import requests
-import urllib3
 from youtube_transcript_api import (
     YouTubeTranscriptApi,
     TranscriptsDisabled,
@@ -17,16 +17,6 @@ from youtube_transcript_api import (
 logger = logging.getLogger(__name__)
 
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
-_PROXIES = (
-    {"http": f"http://scraperapi:{SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001",
-     "https": f"http://scraperapi:{SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001"}
-    if SCRAPER_API_KEY else None
-)
-
-# ScraperAPI uses its own SSL cert — disable verification when proxy is active
-if SCRAPER_API_KEY:
-    ssl._create_default_https_context = ssl._create_unverified_context
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 @dataclass
@@ -95,7 +85,81 @@ def extract_youtube_id(url: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# YouTube
+# ScraperAPI helper
+# ---------------------------------------------------------------------------
+
+def _scraper_fetch(url: str) -> str:
+    """Fetch a URL via ScraperAPI's direct API — no proxy, no SSL issues."""
+    resp = requests.get(
+        "https://api.scraperapi.com/",
+        params={"api_key": SCRAPER_API_KEY, "url": url},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return resp.text
+
+
+# ---------------------------------------------------------------------------
+# YouTube captions via ScraperAPI (server-side)
+# ---------------------------------------------------------------------------
+
+def _fetch_captions_via_scraper(video_id: str) -> list:
+    """Fetch YouTube captions by scraping the watch page via ScraperAPI."""
+    logger.info("Fetching captions via ScraperAPI...")
+
+    # Step 1: Fetch the YouTube watch page
+    html = _scraper_fetch(f"https://www.youtube.com/watch?v={video_id}")
+
+    # Step 2: Extract captionTracks from the page's JavaScript
+    match = re.search(r'"captionTracks"\s*:\s*(\[.*?\])', html)
+    if not match:
+        raise RuntimeError(
+            "No captions are available for this video. "
+            "Only videos with existing captions (auto-generated or manual) are supported."
+        )
+
+    try:
+        tracks = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        raise RuntimeError("Failed to parse caption track data from YouTube.")
+
+    if not tracks:
+        raise RuntimeError("No captions are available for this video.")
+
+    # Prefer English, fall back to first available
+    caption_url = None
+    for track in tracks:
+        if track.get("languageCode", "").startswith("en"):
+            caption_url = track.get("baseUrl")
+            break
+    if not caption_url:
+        caption_url = tracks[0].get("baseUrl")
+
+    if not caption_url:
+        raise RuntimeError("Caption URL not found in track data.")
+
+    # Step 3: Fetch the captions XML via ScraperAPI
+    logger.info("Fetching caption XML...")
+    xml_text = _scraper_fetch(caption_url)
+
+    # Step 4: Parse XML into segments
+    root = ElementTree.fromstring(xml_text)
+    segments = []
+    for elem in root.findall(".//text"):
+        start = float(elem.get("start", 0))
+        text = unescape(elem.text or "")
+        if text.strip():
+            segments.append({"start": start, "text": text})
+
+    if not segments:
+        raise RuntimeError("Captions were found but contained no text.")
+
+    logger.info(f"Parsed {len(segments)} caption segments.")
+    return segments
+
+
+# ---------------------------------------------------------------------------
+# YouTube metadata
 # ---------------------------------------------------------------------------
 
 def _get_metadata(video_id: str) -> dict:
@@ -113,6 +177,10 @@ def _get_metadata(video_id: str) -> dict:
         return {"title": "Unknown Title", "channel": "Unknown Channel"}
 
 
+# ---------------------------------------------------------------------------
+# YouTube pipeline
+# ---------------------------------------------------------------------------
+
 def transcribe_youtube(url: str) -> TranscriptResult:
     video_id = extract_youtube_id(url)
     if not video_id:
@@ -124,26 +192,29 @@ def transcribe_youtube(url: str) -> TranscriptResult:
     meta = _get_metadata(video_id)
     title = meta["title"]
     channel = meta["channel"]
-    date = ""
-    duration_min = 0
 
     logger.info("Fetching captions...")
-    try:
-        entries = YouTubeTranscriptApi.get_transcript(video_id, proxies=_PROXIES)
-        logger.info("Captions found.")
-        segments = [{"start": e["start"], "text": e["text"]} for e in entries]
-        return TranscriptResult(
-            title=title, source=channel, date=date,
-            duration_minutes=duration_min, url=url,
-            segments=segments, method="captions",
-        )
-    except (TranscriptsDisabled, NoTranscriptFound):
-        raise RuntimeError(
-            "No captions are available for this video. "
-            "Only videos with existing captions (auto-generated or manual) are supported."
-        )
-    except Exception as e:
-        raise RuntimeError(f"Failed to fetch captions: {e}")
+
+    if SCRAPER_API_KEY:
+        # Server path: use ScraperAPI to bypass YouTube IP blocking
+        segments = _fetch_captions_via_scraper(video_id)
+    else:
+        # Local path: use youtube-transcript-api directly
+        try:
+            entries = YouTubeTranscriptApi.get_transcript(video_id)
+            segments = [{"start": e["start"], "text": e["text"]} for e in entries]
+        except (TranscriptsDisabled, NoTranscriptFound):
+            raise RuntimeError(
+                "No captions are available for this video. "
+                "Only videos with existing captions (auto-generated or manual) are supported."
+            )
+
+    logger.info("Captions found.")
+    return TranscriptResult(
+        title=title, source=channel, date="",
+        duration_minutes=0, url=url,
+        segments=segments, method="captions",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -192,15 +263,18 @@ def _search_youtube(query: str) -> Optional[str]:
     """Search YouTube via scraping — no API key needed."""
     logger.info(f"Searching YouTube: {query!r}")
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-        resp = requests.get(
-            "https://www.youtube.com/results",
-            params={"search_query": query},
-            headers=headers,
-            timeout=10,
-        )
-        # Extract video IDs from the response
-        ids = re.findall(r'"videoId":"([A-Za-z0-9_-]{11})"', resp.text)
+        if SCRAPER_API_KEY:
+            html = _scraper_fetch(f"https://www.youtube.com/results?search_query={requests.utils.quote(query)}")
+        else:
+            headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+            resp = requests.get(
+                "https://www.youtube.com/results",
+                params={"search_query": query},
+                headers=headers,
+                timeout=10,
+            )
+            html = resp.text
+        ids = re.findall(r'"videoId":"([A-Za-z0-9_-]{11})"', html)
         if ids:
             return f"https://www.youtube.com/watch?v={ids[0]}"
     except Exception as e:
@@ -235,7 +309,7 @@ def transcribe_spotify(url: str) -> TranscriptResult:
 
     logger.info(f"Found on YouTube: {yt_url}")
     result = transcribe_youtube(yt_url)
-    result.url = url  # surface original Spotify URL
+    result.url = url
     return result
 
 
