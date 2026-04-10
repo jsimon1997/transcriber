@@ -18,6 +18,62 @@ logger = logging.getLogger(__name__)
 
 from transcribe import transcribe_url  # noqa: E402 — after load_dotenv
 
+# ---------------------------------------------------------------------------
+# AI Insights via Claude API
+# ---------------------------------------------------------------------------
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+
+
+def generate_insights(transcript: str, title: str) -> list[str]:
+    """Call Claude to extract 5-10 key insights from a transcript."""
+    if not ANTHROPIC_API_KEY:
+        logger.warning("No ANTHROPIC_API_KEY set — skipping insights")
+        return []
+
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    # Truncate very long transcripts to ~60k chars to stay within context
+    max_chars = 60_000
+    trunc = transcript[:max_chars]
+    if len(transcript) > max_chars:
+        trunc += "\n\n[transcript truncated for summarisation]"
+
+    prompt = (
+        f"Here is a transcript of \"{title}\":\n\n"
+        f"{trunc}\n\n"
+        "Based on this transcript, provide exactly 5 to 10 key insights, "
+        "learnings, or takeaways. Each insight should be a concise but "
+        "informative bullet point (1-2 sentences). Focus on the most "
+        "valuable, surprising, or actionable ideas discussed. "
+        "Return ONLY the numbered list, no preamble or closing remarks."
+    )
+
+    try:
+        message = client.messages.create(
+            model="claude-3-5-haiku-latest",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = message.content[0].text.strip()
+        # Parse numbered lines into a list
+        lines = [
+            re.sub(r"^\d+[\.\)]\s*", "", line.strip())
+            for line in raw.split("\n")
+            if line.strip() and re.match(r"^\d+[\.\)]", line.strip())
+        ]
+        if lines:
+            return lines
+        # Fallback: return raw split by newlines
+        return [l.strip() for l in raw.split("\n") if l.strip()]
+    except Exception as e:
+        logger.error(f"Insights generation failed: {e}", exc_info=True)
+        return []
+
+
+import re  # noqa: E402 — needed for generate_insights
+
 app = FastAPI(title="Transcriber")
 
 # ---------------------------------------------------------------------------
@@ -86,6 +142,8 @@ HTML = """<!DOCTYPE html>
     animation: spin 0.7s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Result container */
   #result-box {
     display: none;
     background: #fff;
@@ -115,6 +173,67 @@ HTML = """<!DOCTYPE html>
     transition: background 0.1s;
   }
   button.sec:hover { background: #f3f4f6; }
+
+  /* Insights section */
+  #insights-section {
+    padding: 1.2rem 1rem;
+    border-bottom: 1px solid #e5e7eb;
+  }
+  #insights-section h2 {
+    font-size: 1rem;
+    font-weight: 700;
+    margin-bottom: 0.8rem;
+    color: #1e3a5f;
+  }
+  #insights-list {
+    list-style: none;
+    padding: 0;
+  }
+  #insights-list li {
+    position: relative;
+    padding: 0.6rem 0 0.6rem 2rem;
+    font-size: 0.9rem;
+    line-height: 1.55;
+    color: #1f2937;
+    border-bottom: 1px solid #f3f4f6;
+  }
+  #insights-list li:last-child { border-bottom: none; }
+  #insights-list li::before {
+    content: attr(data-num);
+    position: absolute;
+    left: 0;
+    top: 0.6rem;
+    width: 1.5rem;
+    height: 1.5rem;
+    background: #2563eb;
+    color: #fff;
+    border-radius: 50%;
+    font-size: 0.72rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Toggle transcript button */
+  #toggle-transcript-btn {
+    display: block;
+    width: 100%;
+    padding: 0.75rem 1rem;
+    background: #f9fafb;
+    border: none;
+    border-bottom: 1px solid #e5e7eb;
+    font-size: 0.88rem;
+    font-weight: 600;
+    color: #2563eb;
+    cursor: pointer;
+    text-align: center;
+    transition: background 0.15s;
+  }
+  #toggle-transcript-btn:hover { background: #eef2ff; }
+
+  /* Transcript */
+  #transcript-section { display: none; }
   #transcript {
     padding: 1.2rem 1rem;
     white-space: pre-wrap;
@@ -131,7 +250,7 @@ HTML = """<!DOCTYPE html>
 <body>
 <div class="container">
   <h1>Transcriber</h1>
-  <p class="subtitle">Paste a YouTube or Spotify podcast URL and get a timestamped transcript.</p>
+  <p class="subtitle">Paste a YouTube or Spotify podcast URL and get key insights + a timestamped transcript.</p>
 
   <div class="input-row">
     <input type="text" id="url-input"
@@ -152,7 +271,20 @@ HTML = """<!DOCTYPE html>
         <button class="sec" onclick="downloadTranscript()">Download .md</button>
       </div>
     </div>
-    <pre id="transcript"></pre>
+
+    <!-- Key Insights -->
+    <div id="insights-section">
+      <h2>Key Takeaways</h2>
+      <ol id="insights-list"></ol>
+    </div>
+
+    <!-- Toggle Transcript -->
+    <button id="toggle-transcript-btn" onclick="toggleTranscript()">View Full Transcript</button>
+
+    <!-- Full Transcript (hidden by default) -->
+    <div id="transcript-section">
+      <pre id="transcript"></pre>
+    </div>
   </div>
 
   <p class="footer-note" id="footer-note"></p>
@@ -161,6 +293,7 @@ HTML = """<!DOCTYPE html>
 <script>
 let currentTranscript = '';
 let currentTitle = '';
+let transcriptVisible = false;
 
 async function startTranscription() {
   const url = document.getElementById('url-input').value.trim();
@@ -174,9 +307,12 @@ async function startTranscription() {
 
   btn.disabled = true;
   spinner.style.display = 'block';
-  statusText.textContent = 'Processing\u2026 (may take a few minutes for long content)';
+  statusText.textContent = 'Processing... (may take a few minutes for long content)';
   statusEl.className = '';
   resultBox.style.display = 'none';
+  transcriptVisible = false;
+  document.getElementById('transcript-section').style.display = 'none';
+  document.getElementById('toggle-transcript-btn').textContent = 'View Full Transcript';
 
   try {
     const resp = await fetch('/transcribe', {
@@ -192,11 +328,32 @@ async function startTranscription() {
     } else {
       currentTranscript = data.transcript;
       currentTitle = data.title || 'transcript';
-      document.getElementById('transcript').textContent = data.transcript;
+
+      // Meta header
       document.getElementById('result-meta').innerHTML =
         '<strong>' + escHtml(data.title) + '</strong>'
         + ' &middot; ' + escHtml(data.source)
         + (data.date ? ' &middot; ' + escHtml(data.date) : '');
+
+      // Insights
+      const insightsList = document.getElementById('insights-list');
+      const insightsSection = document.getElementById('insights-section');
+      insightsList.innerHTML = '';
+      if (data.insights && data.insights.length > 0) {
+        data.insights.forEach((insight, i) => {
+          const li = document.createElement('li');
+          li.setAttribute('data-num', i + 1);
+          li.textContent = insight;
+          insightsList.appendChild(li);
+        });
+        insightsSection.style.display = 'block';
+      } else {
+        insightsSection.style.display = 'none';
+      }
+
+      // Transcript (hidden initially)
+      document.getElementById('transcript').textContent = data.transcript;
+
       resultBox.style.display = 'block';
       statusText.textContent = 'Done.';
       document.getElementById('footer-note').textContent = 'Method: ' + data.method;
@@ -208,6 +365,13 @@ async function startTranscription() {
     btn.disabled = false;
     spinner.style.display = 'none';
   }
+}
+
+function toggleTranscript() {
+  transcriptVisible = !transcriptVisible;
+  document.getElementById('transcript-section').style.display = transcriptVisible ? 'block' : 'none';
+  document.getElementById('toggle-transcript-btn').textContent =
+    transcriptVisible ? 'Hide Full Transcript' : 'View Full Transcript';
 }
 
 function escHtml(s) {
@@ -262,6 +426,10 @@ def transcribe(req: TranscribeRequest):
     try:
         result = transcribe_url(req.url)
         logger.info(f"Done: {result['title']} [{result['method']}]")
+        # Generate AI insights
+        insights = generate_insights(result["transcript"], result["title"])
+        result["insights"] = insights
+        logger.info(f"Generated {len(insights)} insights")
         return result
     except ValueError as e:
         logger.warning(f"Bad request: {e}")
