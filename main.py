@@ -43,30 +43,55 @@ def generate_insights(transcript: str, title: str) -> list[str]:
     prompt = (
         f"Here is a transcript of \"{title}\":\n\n"
         f"{trunc}\n\n"
-        "Based on this transcript, provide exactly 5 to 10 key insights, "
-        "learnings, or takeaways. Each insight should be a concise but "
-        "informative bullet point (1-2 sentences). Focus on the most "
-        "valuable, surprising, or actionable ideas discussed. "
-        "Return ONLY the numbered list, no preamble or closing remarks."
+        "Based on this transcript, provide exactly 5 key insights, learnings, "
+        "or takeaways. Focus on the most valuable, surprising, or actionable "
+        "ideas discussed.\n\n"
+        "Format EXACTLY like this (no preamble, no closing remarks):\n"
+        "1. **Bold insight headline here**\n"
+        "   - Supporting detail or example (1 sentence)\n"
+        "   - Another supporting detail (1 sentence)\n"
+        "2. **Next insight headline**\n"
+        "   - Supporting detail\n"
+        "...\n\n"
+        "Rules:\n"
+        "- Exactly 5 numbered insights\n"
+        "- Each insight has a bold headline (concise, ~10 words)\n"
+        "- Each insight has 1-2 supporting bullet points with concrete details from the discussion\n"
+        "- Supporting bullets should add real substance — specific examples, data, quotes, or context"
     )
 
     try:
         message = client.messages.create(
             model="claude-3-5-haiku-latest",
-            max_tokens=1024,
+            max_tokens=2048,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = message.content[0].text.strip()
-        # Parse numbered lines into a list
-        lines = [
-            re.sub(r"^\d+[\.\)]\s*", "", line.strip())
-            for line in raw.split("\n")
-            if line.strip() and re.match(r"^\d+[\.\)]", line.strip())
-        ]
-        if lines:
-            return lines
-        # Fallback: return raw split by newlines
-        return [l.strip() for l in raw.split("\n") if l.strip()]
+
+        # Parse into structured insights: list of {headline, bullets}
+        insights = []
+        current = None
+        for line in raw.split("\n"):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Numbered headline: "1. **Something**" or "1. Something"
+            m = re.match(r"^\d+[\.\)]\s*(.*)", stripped)
+            if m:
+                if current:
+                    insights.append(current)
+                headline = m.group(1).strip()
+                # Remove bold markdown for clean text
+                headline = re.sub(r"\*\*(.*?)\*\*", r"\1", headline)
+                current = {"headline": headline, "bullets": []}
+            # Sub-bullet: "- Something" or "• Something"
+            elif re.match(r"^[-•–]\s+", stripped) and current is not None:
+                bullet = re.sub(r"^[-•–]\s+", "", stripped)
+                current["bullets"].append(bullet)
+        if current:
+            insights.append(current)
+
+        return insights
     except Exception as e:
         logger.error(f"Insights generation failed: {e}", exc_info=True)
         return []
@@ -176,43 +201,61 @@ HTML = """<!DOCTYPE html>
 
   /* Insights section */
   #insights-section {
-    padding: 1.2rem 1rem;
+    padding: 1.2rem 1rem 0.6rem;
     border-bottom: 1px solid #e5e7eb;
   }
   #insights-section h2 {
-    font-size: 1rem;
+    font-size: 1.05rem;
     font-weight: 700;
-    margin-bottom: 0.8rem;
+    margin-bottom: 1rem;
     color: #1e3a5f;
   }
-  #insights-list {
-    list-style: none;
-    padding: 0;
-  }
-  #insights-list li {
+  .insight-item {
     position: relative;
-    padding: 0.6rem 0 0.6rem 2rem;
-    font-size: 0.9rem;
-    line-height: 1.55;
-    color: #1f2937;
-    border-bottom: 1px solid #f3f4f6;
+    padding: 0 0 1rem 2.4rem;
+    margin-bottom: 0.2rem;
   }
-  #insights-list li:last-child { border-bottom: none; }
-  #insights-list li::before {
-    content: attr(data-num);
+  .insight-item:last-child { padding-bottom: 0.5rem; }
+  .insight-num {
     position: absolute;
     left: 0;
-    top: 0.6rem;
-    width: 1.5rem;
-    height: 1.5rem;
+    top: 0;
+    width: 1.6rem;
+    height: 1.6rem;
     background: #2563eb;
     color: #fff;
     border-radius: 50%;
-    font-size: 0.72rem;
+    font-size: 0.75rem;
     font-weight: 700;
     display: flex;
     align-items: center;
     justify-content: center;
+  }
+  .insight-headline {
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: #111;
+    line-height: 1.6;
+    margin-bottom: 0.3rem;
+  }
+  .insight-bullets {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .insight-bullets li {
+    position: relative;
+    padding-left: 0.9rem;
+    font-size: 0.84rem;
+    line-height: 1.55;
+    color: #4b5563;
+    margin-bottom: 0.15rem;
+  }
+  .insight-bullets li::before {
+    content: "–";
+    position: absolute;
+    left: 0;
+    color: #9ca3af;
   }
 
   /* Toggle transcript button */
@@ -275,7 +318,7 @@ HTML = """<!DOCTYPE html>
     <!-- Key Insights -->
     <div id="insights-section">
       <h2>Key Takeaways</h2>
-      <ol id="insights-list"></ol>
+      <div id="insights-list"></div>
     </div>
 
     <!-- Toggle Transcript -->
@@ -341,10 +384,31 @@ async function startTranscription() {
       insightsList.innerHTML = '';
       if (data.insights && data.insights.length > 0) {
         data.insights.forEach((insight, i) => {
-          const li = document.createElement('li');
-          li.setAttribute('data-num', i + 1);
-          li.textContent = insight;
-          insightsList.appendChild(li);
+          const div = document.createElement('div');
+          div.className = 'insight-item';
+
+          const num = document.createElement('span');
+          num.className = 'insight-num';
+          num.textContent = i + 1;
+          div.appendChild(num);
+
+          const headline = document.createElement('div');
+          headline.className = 'insight-headline';
+          headline.textContent = insight.headline || insight;
+          div.appendChild(headline);
+
+          if (insight.bullets && insight.bullets.length > 0) {
+            const ul = document.createElement('ul');
+            ul.className = 'insight-bullets';
+            insight.bullets.forEach(b => {
+              const li = document.createElement('li');
+              li.textContent = b;
+              ul.appendChild(li);
+            });
+            div.appendChild(ul);
+          }
+
+          insightsList.appendChild(div);
         });
         insightsSection.style.display = 'block';
       } else {
