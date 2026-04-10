@@ -225,6 +225,12 @@ def _fetch_captions_ytdlp(video_id: str) -> tuple:
             "outtmpl": outtmpl,
             "quiet": True,
             "no_warnings": True,
+            # Use player clients that bypass YouTube bot detection
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["mediaconnect", "android", "web"],
+                }
+            },
         }
 
         logger.info(f"Running yt-dlp for {video_id}...")
