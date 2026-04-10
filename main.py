@@ -272,83 +272,35 @@ def transcribe(req: TranscribeRequest):
 
 @app.get("/debug")
 def debug():
-    """Test multiple strategies for getting YouTube captions."""
-    import time, re as re_mod
-    from transcribe import SCRAPER_API_KEY
-    import requests as req
-    import warnings
-    warnings.filterwarnings("ignore")
+    """Test caption fetching with session cookies."""
+    import time
+    from transcribe import _fetch_captions_with_session, _fetch_captions_via_scraper_session, SCRAPER_API_KEY
+    results = {"video_id": "dQw4w9WgXcQ", "scraper_key_set": bool(SCRAPER_API_KEY)}
 
-    video_id = "dQw4w9WgXcQ"
-    results = {"video_id": video_id}
-
-    # --- Strategy A: ScraperAPI premium caption URL fetch ---
+    # Test 1: Direct session with cookies
     try:
         t0 = time.time()
-        html = req.get("https://api.scraperapi.com/", params={
-            "api_key": SCRAPER_API_KEY,
-            "url": f"https://www.youtube.com/watch?v={video_id}",
-        }, timeout=60).text
-
-        match = re_mod.search(r'"captionTracks"\s*:\s*(\[.*?\])', html)
-        if match:
-            import json as j
-            tracks = j.loads(match.group(1))
-            cap_url = tracks[0].get("baseUrl", "").replace("\\u0026", "&")
-
-            # Try premium=true for caption URL
-            t1 = time.time()
-            r1 = req.get("https://api.scraperapi.com/", params={
-                "api_key": SCRAPER_API_KEY,
-                "url": cap_url,
-                "premium": "true",
-            }, timeout=60)
-            c1 = r1.text.strip()
-            results["premium_caption"] = {"len": len(c1), "time": round(time.time() - t1, 1), "preview": c1[:200] if c1 else "(empty)"}
-
-            # Try ultra_premium=true
-            t2 = time.time()
-            r2 = req.get("https://api.scraperapi.com/", params={
-                "api_key": SCRAPER_API_KEY,
-                "url": cap_url,
-                "ultra_premium": "true",
-            }, timeout=60)
-            c2 = r2.text.strip()
-            results["ultra_premium_caption"] = {"len": len(c2), "time": round(time.time() - t2, 1), "preview": c2[:200] if c2 else "(empty)"}
-    except Exception as e:
-        results["caption_error"] = str(e)
-
-    # --- Strategy B: youtube-transcript-api with ScraperAPI proxy ---
-    try:
-        from youtube_transcript_api import YouTubeTranscriptApi
-        t3 = time.time()
-        proxies = {
-            "https": f"http://scraperapi:{SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001"
+        segs = _fetch_captions_with_session("dQw4w9WgXcQ")
+        results["direct_session"] = {
+            "segments": len(segs),
+            "time": round(time.time() - t0, 1),
+            "first": segs[0] if segs else None,
         }
-        # Monkey-patch to disable SSL verification
-        old_send = req.Session.send
-        def no_verify_send(self, prepared, **kwargs):
-            kwargs['verify'] = False
-            return old_send(self, prepared, **kwargs)
-        req.Session.send = no_verify_send
-        try:
-            entries = YouTubeTranscriptApi.get_transcript(video_id, proxies=proxies)
-            results["proxy_yt_api"] = {"segments": len(entries), "time": round(time.time() - t3, 1), "first": entries[0] if entries else None}
-        except Exception as e:
-            results["proxy_yt_api"] = {"error": str(e), "time": round(time.time() - t3, 1)}
-        finally:
-            req.Session.send = old_send
     except Exception as e:
-        results["proxy_yt_api_error"] = str(e)
+        results["direct_session"] = {"error": str(e), "time": 0}
 
-    # --- Strategy C: youtube-transcript-api direct (no proxy) ---
-    try:
-        from youtube_transcript_api import YouTubeTranscriptApi
-        t4 = time.time()
-        entries = YouTubeTranscriptApi.get_transcript(video_id)
-        results["direct_yt_api"] = {"segments": len(entries), "time": round(time.time() - t4, 1), "first": entries[0] if entries else None}
-    except Exception as e:
-        results["direct_yt_api"] = {"error": str(e)}
+    # Test 2: ScraperAPI session
+    if SCRAPER_API_KEY:
+        try:
+            t1 = time.time()
+            segs2 = _fetch_captions_via_scraper_session("dQw4w9WgXcQ")
+            results["scraper_session"] = {
+                "segments": len(segs2),
+                "time": round(time.time() - t1, 1),
+                "first": segs2[0] if segs2 else None,
+            }
+        except Exception as e:
+            results["scraper_session"] = {"error": str(e)}
 
     return results
 
