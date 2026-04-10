@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import random
 import re
 from typing import Optional
 from dataclasses import dataclass
@@ -85,18 +86,65 @@ def extract_youtube_id(url: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# ScraperAPI helper
+# ScraperAPI helper (with session support)
 # ---------------------------------------------------------------------------
 
-def _scraper_fetch(url: str) -> str:
-    """Fetch a URL via ScraperAPI's direct API — no proxy, no SSL issues."""
+def _scraper_fetch(url: str, session_number: Optional[int] = None) -> str:
+    """Fetch a URL via ScraperAPI direct API.
+
+    Use session_number to pin requests to the same proxy IP — critical
+    for YouTube caption URLs which are IP-bound.
+    """
+    params = {"api_key": SCRAPER_API_KEY, "url": url}
+    if session_number is not None:
+        params["session_number"] = str(session_number)
+
     resp = requests.get(
         "https://api.scraperapi.com/",
-        params={"api_key": SCRAPER_API_KEY, "url": url},
+        params=params,
         timeout=60,
     )
     resp.raise_for_status()
     return resp.text
+
+
+def _clean_caption_url(url: str) -> str:
+    """Ensure all unicode escapes are decoded in caption URLs."""
+    # json.loads handles \u0026 → & but some edge cases leave them.
+    # Belt-and-suspenders cleanup:
+    url = url.replace("\\u0026", "&")
+    url = url.replace("\\u003d", "=")
+    url = url.replace("\\u003f", "?")
+    return url
+
+
+# ---------------------------------------------------------------------------
+# Parse caption segments from JSON or XML
+# ---------------------------------------------------------------------------
+
+def _parse_json_captions(content: str) -> list:
+    """Parse YouTube JSON3 caption format."""
+    data = json.loads(content)
+    segments = []
+    for event in data.get("events", []):
+        start_ms = event.get("tStartMs", 0)
+        segs = event.get("segs", [])
+        text = "".join(s.get("utf8", "") for s in segs).strip()
+        if text and text != "\n":
+            segments.append({"start": start_ms / 1000.0, "text": text})
+    return segments
+
+
+def _parse_xml_captions(content: str) -> list:
+    """Parse YouTube XML caption format."""
+    root = ElementTree.fromstring(content)
+    segments = []
+    for elem in root.findall(".//text"):
+        start = float(elem.get("start", 0))
+        text = unescape(elem.text or "").strip()
+        if text:
+            segments.append({"start": start, "text": text})
+    return segments
 
 
 # ---------------------------------------------------------------------------
@@ -104,13 +152,24 @@ def _scraper_fetch(url: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _fetch_captions_via_scraper(video_id: str) -> list:
-    """Fetch YouTube captions by scraping the watch page via ScraperAPI."""
-    logger.info("Fetching captions via ScraperAPI...")
+    """Fetch YouTube captions by scraping the watch page via ScraperAPI.
+
+    Uses a consistent ScraperAPI session so the page fetch and caption
+    fetch come from the same proxy IP (caption URLs are IP-bound).
+    """
+    # Use a random session number so concurrent requests don't collide
+    session = random.randint(1, 999999)
+
+    logger.info(f"Fetching YouTube page via ScraperAPI (session={session})...")
 
     # Step 1: Fetch the YouTube watch page
-    html = _scraper_fetch(f"https://www.youtube.com/watch?v={video_id}")
+    html = _scraper_fetch(
+        f"https://www.youtube.com/watch?v={video_id}",
+        session_number=session,
+    )
+    logger.info(f"Page fetched: {len(html)} chars")
 
-    # Step 2: Extract captionTracks from the page's JavaScript
+    # Step 2: Extract captionTracks from the page's embedded JavaScript
     match = re.search(r'"captionTracks"\s*:\s*(\[.*?\])', html)
     if not match:
         raise RuntimeError(
@@ -118,13 +177,23 @@ def _fetch_captions_via_scraper(video_id: str) -> list:
             "Only videos with existing captions (auto-generated or manual) are supported."
         )
 
+    raw_json = match.group(1)
+    logger.info(f"captionTracks JSON found ({len(raw_json)} chars)")
+
     try:
-        tracks = json.loads(match.group(1))
+        tracks = json.loads(raw_json)
     except json.JSONDecodeError:
-        raise RuntimeError("Failed to parse caption track data from YouTube.")
+        # Sometimes the JSON has issues; try cleaning unicode escapes first
+        cleaned = raw_json.replace("\\u0026", "&")
+        try:
+            tracks = json.loads(cleaned)
+        except json.JSONDecodeError:
+            raise RuntimeError("Failed to parse caption track data from YouTube.")
 
     if not tracks:
         raise RuntimeError("No captions are available for this video.")
+
+    logger.info(f"Found {len(tracks)} caption track(s): {[t.get('languageCode','?') for t in tracks]}")
 
     # Prefer English, fall back to first available
     caption_url = None
@@ -138,78 +207,67 @@ def _fetch_captions_via_scraper(video_id: str) -> list:
     if not caption_url:
         raise RuntimeError("Caption URL not found in track data.")
 
-    # Step 3: Fetch the captions — try direct first, then ScraperAPI
-    logger.info(f"Fetching captions from: {caption_url[:80]}...")
+    # Clean any remaining unicode escapes
+    caption_url = _clean_caption_url(caption_url)
+    logger.info(f"Caption URL (cleaned): {caption_url[:100]}...")
 
-    # Add JSON format for easier parsing
+    # Step 3: Fetch captions using the SAME ScraperAPI session (same proxy IP)
     json_url = caption_url + ("&" if "?" in caption_url else "?") + "fmt=json3"
 
     segments = []
 
-    # Try direct fetch first (timedtext API is often not blocked)
-    for fetch_url, fmt in [(json_url, "json"), (caption_url, "xml")]:
+    # Try JSON format first, then XML — all via ScraperAPI with same session
+    for fetch_url, fmt, parser in [
+        (json_url, "json3", _parse_json_captions),
+        (caption_url, "xml", _parse_xml_captions),
+    ]:
         try:
-            resp = requests.get(fetch_url, timeout=15)
-            resp.raise_for_status()
-            content = resp.text.strip()
+            logger.info(f"Fetching captions ({fmt}) via ScraperAPI (session={session})...")
+            content = _scraper_fetch(fetch_url, session_number=session).strip()
+            logger.info(f"Caption response ({fmt}): {len(content)} chars")
+
             if not content:
+                logger.warning(f"Empty response for {fmt} format")
                 continue
 
-            if fmt == "json":
-                data = json.loads(content)
-                for event in data.get("events", []):
-                    start_ms = event.get("tStartMs", 0)
-                    segs = event.get("segs", [])
-                    text = "".join(s.get("utf8", "") for s in segs).strip()
-                    if text and text != "\n":
-                        segments.append({"start": start_ms / 1000.0, "text": text})
-            else:
-                root = ElementTree.fromstring(content)
-                for elem in root.findall(".//text"):
-                    start = float(elem.get("start", 0))
-                    text = unescape(elem.text or "").strip()
-                    if text:
-                        segments.append({"start": start, "text": text})
-
+            segments = parser(content)
             if segments:
+                logger.info(f"Parsed {len(segments)} segments from {fmt} format")
                 break
+            else:
+                logger.warning(f"No segments parsed from {fmt} format")
+        except requests.exceptions.HTTPError as e:
+            logger.warning(f"ScraperAPI caption fetch ({fmt}) HTTP error: {e}")
         except Exception as e:
-            logger.warning(f"Direct caption fetch ({fmt}) failed: {e}")
+            logger.warning(f"ScraperAPI caption fetch ({fmt}) failed: {e}")
 
-    # If direct fetch failed, try via ScraperAPI
+    # Fallback: try direct fetch (works for some videos from some IPs)
     if not segments:
-        logger.info("Direct fetch failed, trying via ScraperAPI...")
-        for fetch_url, fmt in [(json_url, "json"), (caption_url, "xml")]:
+        logger.info("ScraperAPI session fetch failed, trying direct fetch as fallback...")
+        for fetch_url, fmt, parser in [
+            (json_url, "json3", _parse_json_captions),
+            (caption_url, "xml", _parse_xml_captions),
+        ]:
             try:
-                content = _scraper_fetch(fetch_url).strip()
+                resp = requests.get(fetch_url, timeout=15)
+                resp.raise_for_status()
+                content = resp.text.strip()
+                logger.info(f"Direct fetch ({fmt}): {len(content)} chars")
                 if not content:
                     continue
-
-                if fmt == "json":
-                    data = json.loads(content)
-                    for event in data.get("events", []):
-                        start_ms = event.get("tStartMs", 0)
-                        segs = event.get("segs", [])
-                        text = "".join(s.get("utf8", "") for s in segs).strip()
-                        if text and text != "\n":
-                            segments.append({"start": start_ms / 1000.0, "text": text})
-                else:
-                    root = ElementTree.fromstring(content)
-                    for elem in root.findall(".//text"):
-                        start = float(elem.get("start", 0))
-                        text = unescape(elem.text or "").strip()
-                        if text:
-                            segments.append({"start": start, "text": text})
-
+                segments = parser(content)
                 if segments:
+                    logger.info(f"Direct fetch worked: {len(segments)} segments from {fmt}")
                     break
             except Exception as e:
-                logger.warning(f"ScraperAPI caption fetch ({fmt}) failed: {e}")
+                logger.warning(f"Direct caption fetch ({fmt}) failed: {e}")
 
     if not segments:
-        raise RuntimeError("Captions were found but could not be downloaded.")
+        raise RuntimeError(
+            "Captions were found but could not be downloaded. "
+            "The caption URLs may have expired. Please try again."
+        )
 
-    logger.info(f"Parsed {len(segments)} caption segments.")
     return segments
 
 
@@ -226,7 +284,10 @@ def _get_metadata(video_id: str) -> dict:
         )
         resp.raise_for_status()
         data = resp.json()
-        return {"title": data.get("title", "Unknown Title"), "channel": data.get("author_name", "Unknown Channel")}
+        return {
+            "title": data.get("title", "Unknown Title"),
+            "channel": data.get("author_name", "Unknown Channel"),
+        }
     except Exception as e:
         logger.warning(f"oEmbed fetch failed: {e}")
         return {"title": "Unknown Title", "channel": "Unknown Channel"}
@@ -264,10 +325,15 @@ def transcribe_youtube(url: str) -> TranscriptResult:
                 "Only videos with existing captions (auto-generated or manual) are supported."
             )
 
-    logger.info("Captions found.")
+    # Calculate duration from last segment
+    duration_min = 0.0
+    if segments:
+        duration_min = segments[-1]["start"] / 60.0
+
+    logger.info(f"Transcription complete: {len(segments)} segments, ~{duration_min:.0f} min")
     return TranscriptResult(
         title=title, source=channel, date="",
-        duration_minutes=0, url=url,
+        duration_minutes=duration_min, url=url,
         segments=segments, method="captions",
     )
 
@@ -319,7 +385,9 @@ def _search_youtube(query: str) -> Optional[str]:
     logger.info(f"Searching YouTube: {query!r}")
     try:
         if SCRAPER_API_KEY:
-            html = _scraper_fetch(f"https://www.youtube.com/results?search_query={requests.utils.quote(query)}")
+            html = _scraper_fetch(
+                f"https://www.youtube.com/results?search_query={requests.utils.quote(query)}"
+            )
         else:
             headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
             resp = requests.get(
