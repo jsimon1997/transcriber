@@ -401,6 +401,32 @@ def transcribe_youtube(url: str) -> TranscriptResult:
 # ---------------------------------------------------------------------------
 
 def _fetch_spotify_meta(url: str) -> dict:
+    """Fetch Spotify episode metadata via oEmbed API (works from any IP)."""
+    # Try oEmbed first (no JS required, works from cloud IPs)
+    try:
+        resp = requests.get(
+            "https://open.spotify.com/oembed",
+            params={"url": url},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        # oEmbed returns: title (episode name), provider_name ("Spotify")
+        # The title format is usually "Episode Name - Show Name" or just "Episode Name"
+        title = data.get("title", "")
+        # Try to split "Episode - Show" format
+        show_name = ""
+        if " - " in title:
+            parts = title.rsplit(" - ", 1)
+            if len(parts) == 2:
+                title, show_name = parts[0], parts[1]
+        if not show_name:
+            show_name = "Spotify Podcast"
+        return {"title": title, "show_name": show_name}
+    except Exception as e:
+        logger.warning(f"Spotify oEmbed failed: {e}")
+
+    # Fallback: scrape the page directly
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -419,19 +445,6 @@ def _fetch_spotify_meta(url: str) -> dict:
 
         title = og("title")
         show_name = og("site_name") or "Spotify Podcast"
-
-        ld_match = re.search(
-            r'<script type="application/ld\+json">(.*?)</script>', html, re.DOTALL
-        )
-        if ld_match:
-            try:
-                data = json.loads(ld_match.group(1))
-                title = data.get("name", title)
-                if "partOfSeries" in data:
-                    show_name = data["partOfSeries"].get("name", show_name)
-            except Exception:
-                pass
-
         return {"title": title, "show_name": show_name}
     except Exception as e:
         logger.warning(f"Spotify page fetch failed: {e}")
