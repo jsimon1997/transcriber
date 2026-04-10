@@ -272,22 +272,70 @@ def transcribe(req: TranscribeRequest):
 
 @app.get("/debug")
 def debug():
-    """Quick diagnostic — tests innertube transcript API."""
-    import time
-    from transcribe import _fetch_transcript_innertube, SCRAPER_API_KEY
-    results = {"scraper_key_set": bool(SCRAPER_API_KEY)}
-    try:
-        t0 = time.time()
-        segments = _fetch_transcript_innertube("dQw4w9WgXcQ")
-        results["innertube_time"] = round(time.time() - t0, 1)
-        results["innertube_segments"] = len(segments)
-        if segments:
-            results["first_segment"] = segments[0]
-            results["last_segment"] = segments[-1]
-    except Exception as e:
-        results["innertube_error"] = str(e)
-        import traceback
-        results["innertube_traceback"] = traceback.format_exc()
+    """Quick diagnostic — tests innertube transcript API with different param encodings."""
+    import time, base64, json as json_mod
+    from transcribe import SCRAPER_API_KEY, INNERTUBE_API_KEY
+    import requests as req
+
+    video_id = "dQw4w9WgXcQ"
+    vid = video_id.encode()
+    results = {"video_id": video_id}
+
+    # Try different protobuf encodings
+    encodings = {}
+
+    # Encoding 1: simple single-level
+    p1 = b'\x0a' + bytes([len(vid)]) + vid
+    encodings["single"] = base64.b64encode(p1).decode()
+
+    # Encoding 2: double-nested (what we had)
+    inner = b'\x0a' + bytes([len(vid)]) + vid
+    p2 = b'\x0a' + bytes([len(inner)]) + inner
+    encodings["double_nested"] = base64.b64encode(p2).decode()
+
+    # Encoding 3: video_id field + inner message with video_id + field4=0
+    vid_field = b'\x0a' + bytes([len(vid)]) + vid
+    inner3 = vid_field + b'\x20\x00'
+    p3 = vid_field + b'\x12' + bytes([len(inner3)]) + inner3
+    encodings["yt_style"] = base64.b64encode(p3).decode()
+
+    results["params_tested"] = list(encodings.keys())
+
+    for name, params in encodings.items():
+        try:
+            t0 = time.time()
+            resp = req.post(
+                f"https://www.youtube.com/youtubei/v1/get_transcript?key={INNERTUBE_API_KEY}",
+                json={
+                    "context": {
+                        "client": {
+                            "clientName": "WEB",
+                            "clientVersion": "2.20241120.01.00",
+                            "hl": "en",
+                            "gl": "US",
+                        }
+                    },
+                    "params": params,
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Origin": "https://www.youtube.com",
+                    "Referer": f"https://www.youtube.com/watch?v={video_id}",
+                },
+                timeout=30,
+            )
+            elapsed = round(time.time() - t0, 1)
+            body = resp.text[:500]
+            results[name] = {
+                "status": resp.status_code,
+                "time": elapsed,
+                "body_preview": body,
+                "params_b64": params,
+            }
+        except Exception as e:
+            results[name] = {"error": str(e)}
+
     return results
 
 
