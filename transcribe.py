@@ -233,6 +233,12 @@ def _fetch_captions_ytdlp(video_id: str) -> tuple:
             },
         }
 
+        # If ScraperAPI is available, use it as proxy to bypass IP blocking
+        if SCRAPER_API_KEY:
+            ydl_opts["proxy"] = f"http://scraperapi:{SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001"
+            ydl_opts["nocheckcertificate"] = True
+            logger.info("Using ScraperAPI proxy for yt-dlp")
+
         logger.info(f"Running yt-dlp for {video_id}...")
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
