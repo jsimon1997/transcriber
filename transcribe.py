@@ -6,7 +6,6 @@ from typing import Optional
 from dataclasses import dataclass
 
 import requests
-import yt_dlp
 from youtube_transcript_api import (
     YouTubeTranscriptApi,
     TranscriptsDisabled,
@@ -81,20 +80,23 @@ def extract_youtube_id(url: str) -> Optional[str]:
     return None
 
 
-def _fmt_date(raw: str) -> str:
-    if raw and len(raw) == 8 and raw.isdigit():
-        return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
-    return raw or ""
-
-
 # ---------------------------------------------------------------------------
 # YouTube
 # ---------------------------------------------------------------------------
 
-def _get_metadata(url: str) -> dict:
-    opts = {"quiet": True, "no_warnings": True, "skip_download": True}
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        return ydl.extract_info(url, download=False)
+def _get_metadata(video_id: str) -> dict:
+    """Fetch title and channel via YouTube oEmbed — no API key, no bot detection."""
+    try:
+        resp = requests.get(
+            f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json",
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return {"title": data.get("title", "Unknown Title"), "channel": data.get("author_name", "Unknown Channel")}
+    except Exception as e:
+        logger.warning(f"oEmbed fetch failed: {e}")
+        return {"title": "Unknown Title", "channel": "Unknown Channel"}
 
 
 def transcribe_youtube(url: str) -> TranscriptResult:
@@ -105,11 +107,11 @@ def transcribe_youtube(url: str) -> TranscriptResult:
     logger.info(f"YouTube video ID: {video_id}")
 
     logger.info("Fetching video metadata...")
-    meta = _get_metadata(url)
-    title = meta.get("title", "Unknown Title")
-    channel = meta.get("uploader") or meta.get("channel", "Unknown Channel")
-    date = _fmt_date(meta.get("upload_date", ""))
-    duration_min = (meta.get("duration") or 0) / 60
+    meta = _get_metadata(video_id)
+    title = meta["title"]
+    channel = meta["channel"]
+    date = ""
+    duration_min = 0
 
     logger.info("Fetching captions...")
     try:
@@ -173,16 +175,20 @@ def _fetch_spotify_meta(url: str) -> dict:
 
 
 def _search_youtube(query: str) -> Optional[str]:
+    """Search YouTube via scraping — no API key needed."""
     logger.info(f"Searching YouTube: {query!r}")
-    opts = {"quiet": True, "no_warnings": True, "skip_download": True, "extract_flat": True}
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(f"ytsearch3:{query}", download=False)
-        entries = (info or {}).get("entries", [])
-        if entries:
-            vid_id = entries[0].get("id")
-            if vid_id:
-                return f"https://www.youtube.com/watch?v={vid_id}"
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+        resp = requests.get(
+            "https://www.youtube.com/results",
+            params={"search_query": query},
+            headers=headers,
+            timeout=10,
+        )
+        # Extract video IDs from the response
+        ids = re.findall(r'"videoId":"([A-Za-z0-9_-]{11})"', resp.text)
+        if ids:
+            return f"https://www.youtube.com/watch?v={ids[0]}"
     except Exception as e:
         logger.warning(f"YouTube search error: {e}")
     return None
