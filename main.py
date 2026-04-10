@@ -270,6 +270,35 @@ def transcribe(req: TranscribeRequest):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.get("/debug")
+def debug():
+    """Quick diagnostic endpoint to verify ScraperAPI works."""
+    import time
+    from transcribe import SCRAPER_API_KEY, _scraper_fetch
+    results = {"scraper_key_set": bool(SCRAPER_API_KEY), "scraper_key_prefix": SCRAPER_API_KEY[:8] + "..." if SCRAPER_API_KEY else ""}
+    try:
+        t0 = time.time()
+        html = _scraper_fetch("https://www.youtube.com/watch?v=dQw4w9WgXcQ", session_number=1)
+        results["page_fetch_seconds"] = round(time.time() - t0, 1)
+        results["page_length"] = len(html)
+        import re, json
+        match = re.search(r'"captionTracks"\s*:\s*(\[.*?\])', html)
+        results["captions_found"] = bool(match)
+        if match:
+            tracks = json.loads(match.group(1))
+            results["track_count"] = len(tracks)
+            caption_url = tracks[0].get("baseUrl", "").replace("\\u0026", "&")
+            results["caption_url_prefix"] = caption_url[:80]
+            t1 = time.time()
+            content = _scraper_fetch(caption_url, session_number=1).strip()
+            results["caption_fetch_seconds"] = round(time.time() - t1, 1)
+            results["caption_length"] = len(content)
+            results["caption_preview"] = content[:200] if content else "(empty)"
+    except Exception as e:
+        results["error"] = str(e)
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
