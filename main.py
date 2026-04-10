@@ -272,69 +272,117 @@ def transcribe(req: TranscribeRequest):
 
 @app.get("/debug")
 def debug():
-    """Quick diagnostic — tests innertube transcript API with different param encodings."""
-    import time, base64, json as json_mod
-    from transcribe import SCRAPER_API_KEY, INNERTUBE_API_KEY
+    """Test: ScraperAPI page fetch + extract visitorData + innertube POST."""
+    import time, base64, json as json_mod, re as re_mod
+    from transcribe import SCRAPER_API_KEY
     import requests as req
 
     video_id = "dQw4w9WgXcQ"
-    vid = video_id.encode()
     results = {"video_id": video_id}
 
-    # Try different protobuf encodings
-    encodings = {}
+    try:
+        # Step 1: Fetch YouTube page via ScraperAPI to get context
+        t0 = time.time()
+        page_resp = req.get("https://api.scraperapi.com/", params={
+            "api_key": SCRAPER_API_KEY,
+            "url": f"https://www.youtube.com/watch?v={video_id}",
+        }, timeout=60)
+        html = page_resp.text
+        results["page_time"] = round(time.time() - t0, 1)
+        results["page_len"] = len(html)
 
-    # Encoding 1: simple single-level
-    p1 = b'\x0a' + bytes([len(vid)]) + vid
-    encodings["single"] = base64.b64encode(p1).decode()
+        # Extract API key from page
+        api_key_match = re_mod.search(r'"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"', html)
+        api_key = api_key_match.group(1) if api_key_match else "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
+        results["api_key"] = api_key
 
-    # Encoding 2: double-nested (what we had)
-    inner = b'\x0a' + bytes([len(vid)]) + vid
-    p2 = b'\x0a' + bytes([len(inner)]) + inner
-    encodings["double_nested"] = base64.b64encode(p2).decode()
+        # Extract visitor data
+        visitor_match = re_mod.search(r'"visitorData"\s*:\s*"([^"]+)"', html)
+        visitor_data = visitor_match.group(1) if visitor_match else ""
+        results["visitor_data"] = visitor_data[:30] + "..." if visitor_data else "(none)"
 
-    # Encoding 3: video_id field + inner message with video_id + field4=0
-    vid_field = b'\x0a' + bytes([len(vid)]) + vid
-    inner3 = vid_field + b'\x20\x00'
-    p3 = vid_field + b'\x12' + bytes([len(inner3)]) + inner3
-    encodings["yt_style"] = base64.b64encode(p3).decode()
+        # Extract client version
+        cv_match = re_mod.search(r'"clientVersion"\s*:\s*"([^"]+)"', html)
+        client_version = cv_match.group(1) if cv_match else "2.20241120.01.00"
+        results["client_version"] = client_version
 
-    results["params_tested"] = list(encodings.keys())
+        # Check for engagement panel transcript data in page
+        has_transcript_panel = "transcriptSearchPanelRenderer" in html
+        results["transcript_in_page"] = has_transcript_panel
 
-    for name, params in encodings.items():
+        if has_transcript_panel:
+            # Try to extract transcript directly from page HTML
+            # Look for transcriptSegmentListRenderer
+            seg_match = re_mod.search(r'"transcriptSegmentListRenderer"\s*:\s*\{', html)
+            results["segment_list_in_page"] = bool(seg_match)
+
+        # Build innertube params
+        vid = video_id.encode()
+        vid_field = b'\x0a' + bytes([len(vid)]) + vid
+        inner = vid_field + b'\x20\x00'
+        params = base64.b64encode(vid_field + b'\x12' + bytes([len(inner)]) + inner).decode()
+
+        # Step 2: Try innertube POST with extracted context
+        t1 = time.time()
+        innertube_resp = req.post(
+            f"https://www.youtube.com/youtubei/v1/get_transcript?key={api_key}&prettyPrint=false",
+            json={
+                "context": {
+                    "client": {
+                        "clientName": "WEB",
+                        "clientVersion": client_version,
+                        "hl": "en",
+                        "gl": "US",
+                        "visitorData": visitor_data,
+                    }
+                },
+                "params": params,
+            },
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Origin": "https://www.youtube.com",
+                "Referer": f"https://www.youtube.com/watch?v={video_id}",
+                "X-Youtube-Client-Name": "1",
+                "X-Youtube-Client-Version": client_version,
+            },
+            timeout=30,
+        )
+        results["innertube_status"] = innertube_resp.status_code
+        results["innertube_time"] = round(time.time() - t1, 1)
+        results["innertube_preview"] = innertube_resp.text[:500]
+
+        # Step 3: Try ScraperAPI POST to innertube
+        t2 = time.time()
         try:
-            t0 = time.time()
-            resp = req.post(
-                f"https://www.youtube.com/youtubei/v1/get_transcript?key={INNERTUBE_API_KEY}",
+            scraper_post_resp = req.post(
+                "https://api.scraperapi.com/",
+                params={
+                    "api_key": SCRAPER_API_KEY,
+                    "url": f"https://www.youtube.com/youtubei/v1/get_transcript?key={api_key}&prettyPrint=false",
+                },
                 json={
                     "context": {
                         "client": {
                             "clientName": "WEB",
-                            "clientVersion": "2.20241120.01.00",
+                            "clientVersion": client_version,
                             "hl": "en",
-                            "gl": "US",
                         }
                     },
                     "params": params,
                 },
-                headers={
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Origin": "https://www.youtube.com",
-                    "Referer": f"https://www.youtube.com/watch?v={video_id}",
-                },
-                timeout=30,
+                headers={"Content-Type": "application/json"},
+                timeout=60,
             )
-            elapsed = round(time.time() - t0, 1)
-            body = resp.text[:500]
-            results[name] = {
-                "status": resp.status_code,
-                "time": elapsed,
-                "body_preview": body,
-                "params_b64": params,
-            }
+            results["scraper_post_status"] = scraper_post_resp.status_code
+            results["scraper_post_preview"] = scraper_post_resp.text[:500]
         except Exception as e:
-            results[name] = {"error": str(e)}
+            results["scraper_post_error"] = str(e)
+
+    except Exception as e:
+        results["error"] = str(e)
+        import traceback
+        results["traceback"] = traceback.format_exc()
 
     return results
 
