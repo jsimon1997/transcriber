@@ -2,10 +2,12 @@ import json
 import logging
 import os
 import re
+import ssl
 from typing import Optional
 from dataclasses import dataclass
 
 import requests
+import urllib3
 from youtube_transcript_api import (
     YouTubeTranscriptApi,
     TranscriptsDisabled,
@@ -20,6 +22,11 @@ _PROXIES = (
      "https": f"http://scraperapi:{SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001"}
     if SCRAPER_API_KEY else None
 )
+
+# ScraperAPI uses its own SSL cert — disable verification when proxy is active
+if SCRAPER_API_KEY:
+    ssl._create_default_https_context = ssl._create_unverified_context
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 @dataclass
