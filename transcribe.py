@@ -1,9 +1,13 @@
+import glob
 import json
 import logging
 import os
 import re
+import tempfile
 from typing import Optional
 from dataclasses import dataclass
+from html import unescape
+from xml.etree import ElementTree
 
 import requests
 
@@ -78,119 +82,209 @@ def extract_youtube_id(url: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Parse subtitle files
+# ---------------------------------------------------------------------------
+
+def _parse_json3(content: str) -> list:
+    data = json.loads(content)
+    segments = []
+    for event in data.get("events", []):
+        start_ms = event.get("tStartMs", 0)
+        segs = event.get("segs", [])
+        text = "".join(s.get("utf8", "") for s in segs).strip()
+        if text and text != "\n":
+            segments.append({"start": start_ms / 1000.0, "text": text})
+    return segments
+
+
+def _parse_vtt(content: str) -> list:
+    """Parse WebVTT subtitle format."""
+    segments = []
+    # Match timestamp lines like: 00:00:01.360 --> 00:00:04.500
+    pattern = r"(\d{2}:\d{2}:\d{2}\.\d{3})\s+-->\s+\d{2}:\d{2}:\d{2}\.\d{3}"
+    lines = content.split("\n")
+    i = 0
+    while i < len(lines):
+        m = re.match(pattern, lines[i].strip())
+        if m:
+            ts = m.group(1)
+            parts = ts.split(":")
+            seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+            # Collect text lines until empty line
+            text_lines = []
+            i += 1
+            while i < len(lines) and lines[i].strip():
+                # Remove VTT formatting tags like <c>, </c>, etc.
+                line = re.sub(r"<[^>]+>", "", lines[i].strip())
+                if line:
+                    text_lines.append(line)
+                i += 1
+            text = " ".join(text_lines).strip()
+            if text:
+                segments.append({"start": seconds, "text": text})
+        i += 1
+    return segments
+
+
+def _parse_srv3(content: str) -> list:
+    """Parse YouTube srv3 (XML-based) subtitle format."""
+    try:
+        root = ElementTree.fromstring(content)
+        segments = []
+        for p in root.findall(".//p"):
+            start_ms = int(p.get("t", "0"))
+            text_parts = []
+            # Get direct text
+            if p.text:
+                text_parts.append(p.text)
+            # Get text from child <s> elements
+            for s in p.findall("s"):
+                if s.text:
+                    text_parts.append(s.text)
+                if s.tail:
+                    text_parts.append(s.tail)
+            text = " ".join(text_parts).strip()
+            text = unescape(text)
+            if text:
+                segments.append({"start": start_ms / 1000.0, "text": text})
+        return segments
+    except Exception:
+        return []
+
+
+def _parse_xml_captions(content: str) -> list:
+    """Parse standard YouTube XML caption format."""
+    root = ElementTree.fromstring(content)
+    segments = []
+    for elem in root.findall(".//text"):
+        start = float(elem.get("start", 0))
+        text = unescape(elem.text or "").strip()
+        if text:
+            segments.append({"start": start, "text": text})
+    return segments
+
+
+def _parse_subtitle_file(filepath: str) -> list:
+    """Parse a subtitle file, auto-detecting format."""
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    if not content.strip():
+        return []
+
+    # Try JSON3 first
+    try:
+        segments = _parse_json3(content)
+        if segments:
+            return segments
+    except (json.JSONDecodeError, Exception):
+        pass
+
+    # Try VTT
+    if "WEBVTT" in content[:50] or "-->" in content[:500]:
+        segments = _parse_vtt(content)
+        if segments:
+            return segments
+
+    # Try srv3 / XML
+    if content.strip().startswith("<"):
+        segments = _parse_srv3(content)
+        if segments:
+            return segments
+        segments = _parse_xml_captions(content)
+        if segments:
+            return segments
+
+    return []
+
+
+# ---------------------------------------------------------------------------
 # yt-dlp subtitle extraction (primary method)
 # ---------------------------------------------------------------------------
 
 def _fetch_captions_ytdlp(video_id: str) -> tuple:
-    """Extract subtitles using yt-dlp. Returns (segments, title, channel, duration).
+    """Extract subtitles using yt-dlp.
 
-    yt-dlp handles all YouTube anti-bot measures internally, including
-    using mobile/TV innertube clients that work from cloud IPs.
+    Uses yt-dlp to actually DOWNLOAD subtitles (not just get URLs),
+    so yt-dlp's anti-bot handling (including mobile innertube clients)
+    is used for the actual content download.
     """
     import yt_dlp
 
     url = f"https://www.youtube.com/watch?v={video_id}"
 
-    ydl_opts = {
-        "writesubtitles": True,
-        "writeautomaticsub": True,
-        "subtitleslangs": ["en", "en-US", "en-GB"],
-        "subtitlesformat": "json3",
-        "skip_download": True,
-        "quiet": True,
-        "no_warnings": True,
-        "extract_flat": False,
-    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+        outtmpl = os.path.join(tmpdir, "%(id)s.%(ext)s")
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+        ydl_opts = {
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": ["en", "en-US", "en-GB", "en.*"],
+            "subtitlesformat": "json3/srv3/vtt/best",
+            "skip_download": True,
+            "outtmpl": outtmpl,
+            "quiet": True,
+            "no_warnings": True,
+        }
 
-    title = info.get("title", "Unknown Title")
-    channel = info.get("uploader", info.get("channel", "Unknown Channel"))
-    duration = info.get("duration", 0)
+        logger.info(f"Running yt-dlp for {video_id}...")
 
-    # Try manual subtitles first, then automatic
-    segments = []
-    for sub_type in ["subtitles", "automatic_captions"]:
-        subs = info.get(sub_type, {})
-        if not subs:
-            continue
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
 
-        # Find English subtitles
-        for lang_code in ["en", "en-US", "en-GB"]:
-            if lang_code not in subs:
-                continue
+        title = info.get("title", "Unknown Title")
+        channel = info.get("uploader", info.get("channel", "Unknown Channel"))
+        duration = info.get("duration", 0)
 
-            formats = subs[lang_code]
-            # Prefer json3 format
-            sub_url = None
-            for fmt in formats:
-                if fmt.get("ext") == "json3":
-                    sub_url = fmt.get("url")
-                    break
-            if not sub_url:
-                # Fall back to first available format
-                for fmt in formats:
-                    if fmt.get("url"):
-                        sub_url = fmt.get("url")
-                        break
+        # Find downloaded subtitle files
+        sub_files = glob.glob(os.path.join(tmpdir, f"{video_id}.*"))
+        # Filter to subtitle files only (not video/audio/info)
+        sub_extensions = {".json3", ".vtt", ".srv3", ".srt", ".ttml", ".ass"}
+        sub_files = [f for f in sub_files if any(f.endswith(ext) for ext in sub_extensions)
+                     or ".en." in f or ".en-" in f]
 
-            if sub_url:
-                logger.info(f"Fetching subtitles ({sub_type}/{lang_code})...")
-                try:
-                    resp = requests.get(sub_url, timeout=30)
-                    resp.raise_for_status()
-                    content = resp.text.strip()
+        logger.info(f"yt-dlp files in tmpdir: {[os.path.basename(f) for f in glob.glob(os.path.join(tmpdir, '*'))]}")
+        logger.info(f"Subtitle files found: {[os.path.basename(f) for f in sub_files]}")
 
-                    if not content:
+        segments = []
+        for sub_file in sub_files:
+            logger.info(f"Parsing subtitle file: {os.path.basename(sub_file)}")
+            segments = _parse_subtitle_file(sub_file)
+            if segments:
+                logger.info(f"Parsed {len(segments)} segments from {os.path.basename(sub_file)}")
+                break
+
+        # If no subtitle files were written, try the info dict for subtitle URLs
+        # and fetch them using yt-dlp's URL opener (which handles cookies/auth)
+        if not segments:
+            logger.info("No subtitle files found, trying info dict...")
+            for sub_type in ["subtitles", "automatic_captions"]:
+                subs = info.get(sub_type, {})
+                for lang in ["en", "en-US", "en-GB"]:
+                    if lang not in subs:
                         continue
-
-                    # Try JSON3 format
-                    try:
-                        data = json.loads(content)
-                        for event in data.get("events", []):
-                            start_ms = event.get("tStartMs", 0)
-                            segs = event.get("segs", [])
-                            text = "".join(s.get("utf8", "") for s in segs).strip()
-                            if text and text != "\n":
-                                segments.append({"start": start_ms / 1000.0, "text": text})
-                    except json.JSONDecodeError:
-                        # Try XML format
-                        from html import unescape
-                        from xml.etree import ElementTree
-                        root = ElementTree.fromstring(content)
-                        for elem in root.findall(".//text"):
-                            start = float(elem.get("start", 0))
-                            text = unescape(elem.text or "").strip()
-                            if text:
-                                segments.append({"start": start, "text": text})
-
-                    if segments:
-                        logger.info(f"Got {len(segments)} segments from {sub_type}/{lang_code}")
-                        return segments, title, channel, duration
-                except Exception as e:
-                    logger.warning(f"Failed to fetch subtitle URL: {e}")
-
-        # If we found subtitles dict but URL fetch failed, try getting data directly
-        for lang_code in ["en", "en-US", "en-GB"]:
-            if lang_code not in subs:
-                continue
-            formats = subs[lang_code]
-            for fmt in formats:
-                # Some yt-dlp versions include subtitle data directly
-                if "data" in fmt:
-                    try:
-                        data = json.loads(fmt["data"]) if isinstance(fmt["data"], str) else fmt["data"]
-                        for event in data.get("events", []):
-                            start_ms = event.get("tStartMs", 0)
-                            segs_data = event.get("segs", [])
-                            text = "".join(s.get("utf8", "") for s in segs_data).strip()
-                            if text and text != "\n":
-                                segments.append({"start": start_ms / 1000.0, "text": text})
-                        if segments:
-                            return segments, title, channel, duration
-                    except Exception:
-                        pass
+                    for fmt in subs[lang]:
+                        sub_url = fmt.get("url")
+                        if not sub_url:
+                            continue
+                        try:
+                            # Use yt-dlp's URL opener which has proper cookies
+                            with yt_dlp.YoutubeDL({"quiet": True}) as ydl2:
+                                resp_data = ydl2.urlopen(sub_url).read().decode("utf-8")
+                            if resp_data.strip():
+                                try:
+                                    segments = _parse_json3(resp_data)
+                                except Exception:
+                                    pass
+                                if not segments and ("WEBVTT" in resp_data[:50] or "-->" in resp_data[:500]):
+                                    segments = _parse_vtt(resp_data)
+                                if not segments and resp_data.strip().startswith("<"):
+                                    segments = _parse_srv3(resp_data) or _parse_xml_captions(resp_data)
+                                if segments:
+                                    logger.info(f"Got {len(segments)} segments from URL ({sub_type}/{lang})")
+                                    return segments, title, channel, duration
+                        except Exception as e:
+                            logger.warning(f"yt-dlp URL fetch failed: {e}")
 
     return segments, title, channel, duration
 
@@ -200,18 +294,13 @@ def _fetch_captions_ytdlp(video_id: str) -> tuple:
 # ---------------------------------------------------------------------------
 
 def _fetch_captions_ytapi(video_id: str) -> list:
-    """Fallback: use youtube-transcript-api library."""
-    from youtube_transcript_api import (
-        YouTubeTranscriptApi,
-        TranscriptsDisabled,
-        NoTranscriptFound,
-    )
+    from youtube_transcript_api import YouTubeTranscriptApi
     entries = YouTubeTranscriptApi.get_transcript(video_id)
     return [{"start": e["start"], "text": e["text"]} for e in entries]
 
 
 # ---------------------------------------------------------------------------
-# YouTube metadata (via oEmbed, as backup)
+# YouTube metadata
 # ---------------------------------------------------------------------------
 
 def _get_metadata(video_id: str) -> dict:
@@ -248,33 +337,30 @@ def transcribe_youtube(url: str) -> TranscriptResult:
     method = "unknown"
     errors = []
 
-    # Strategy 1: yt-dlp (handles anti-bot, works from cloud IPs)
+    # Strategy 1: yt-dlp (handles anti-bot, downloads subs properly)
     try:
-        logger.info("Strategy 1: yt-dlp subtitle extraction...")
+        logger.info("Strategy 1: yt-dlp subtitle download...")
         segments, title, channel, duration = _fetch_captions_ytdlp(video_id)
         if segments:
             method = "yt-dlp"
-            logger.info(f"yt-dlp: {len(segments)} segments, title='{title}'")
     except Exception as e:
         logger.warning(f"yt-dlp failed: {e}")
         errors.append(f"yt-dlp: {e}")
 
-    # Strategy 2: youtube-transcript-api (works from residential IPs)
+    # Strategy 2: youtube-transcript-api
     if not segments:
         try:
             logger.info("Strategy 2: youtube-transcript-api...")
             segments = _fetch_captions_ytapi(video_id)
             if segments:
                 method = "yt-api"
-                # Get metadata separately since library doesn't provide it
                 meta = _get_metadata(video_id)
                 title = meta["title"]
                 channel = meta["channel"]
         except Exception as e:
-            logger.warning(f"youtube-transcript-api failed: {e}")
+            logger.warning(f"yt-api failed: {e}")
             errors.append(f"yt-api: {e}")
 
-    # Get metadata via oEmbed if yt-dlp didn't provide it
     if title == "Unknown Title":
         meta = _get_metadata(video_id)
         title = meta["title"]
@@ -341,7 +427,6 @@ def _fetch_spotify_meta(url: str) -> dict:
 
 
 def _search_youtube(query: str) -> Optional[str]:
-    """Search YouTube for a video matching the query."""
     logger.info(f"Searching YouTube: {query!r}")
     try:
         if SCRAPER_API_KEY:
@@ -375,7 +460,6 @@ def transcribe_spotify(url: str) -> TranscriptResult:
     if not title:
         raise ValueError("Could not read episode info from Spotify.")
 
-    logger.info(f"Episode: '{title}' | Show: '{show_name}'")
     yt_url = _search_youtube(f"{show_name} {title}")
     if not yt_url:
         raise RuntimeError(

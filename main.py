@@ -272,14 +272,15 @@ def transcribe(req: TranscribeRequest):
 
 @app.get("/debug")
 def debug():
-    """Test yt-dlp caption extraction."""
+    """Test yt-dlp subtitle download."""
     import time
-    from transcribe import _fetch_captions_ytdlp
-    results = {"video_id": "dQw4w9WgXcQ"}
+    video_id = "ugvHCXCOmm4"  # TED talk that was failing before
+    results = {"video_id": video_id}
 
     try:
+        from transcribe import _fetch_captions_ytdlp
         t0 = time.time()
-        segments, title, channel, duration = _fetch_captions_ytdlp("dQw4w9WgXcQ")
+        segments, title, channel, duration = _fetch_captions_ytdlp(video_id)
         results["ytdlp"] = {
             "segments": len(segments),
             "title": title,
@@ -290,9 +291,9 @@ def debug():
             "last": segments[-1] if segments else None,
         }
     except Exception as e:
-        results["ytdlp"] = {"error": str(e)}
+        results["ytdlp_error"] = str(e)
         import traceback
-        results["traceback"] = traceback.format_exc()
+        results["traceback"] = traceback.format_exc()[-1000:]
 
     return results
 
