@@ -272,64 +272,22 @@ def transcribe(req: TranscribeRequest):
 
 @app.get("/debug")
 def debug():
-    """Quick diagnostic endpoint — tries multiple caption fetch strategies."""
+    """Quick diagnostic — tests innertube transcript API."""
     import time
-    from transcribe import SCRAPER_API_KEY, _scraper_fetch
+    from transcribe import _fetch_transcript_innertube, SCRAPER_API_KEY
     results = {"scraper_key_set": bool(SCRAPER_API_KEY)}
     try:
         t0 = time.time()
-        html = _scraper_fetch("https://www.youtube.com/watch?v=dQw4w9WgXcQ", session_number=99)
-        results["page_fetch_seconds"] = round(time.time() - t0, 1)
-        results["page_length"] = len(html)
-        import re, json
-        match = re.search(r'"captionTracks"\s*:\s*(\[.*?\])', html)
-        results["captions_found"] = bool(match)
-        if match:
-            tracks = json.loads(match.group(1))
-            results["track_count"] = len(tracks)
-            caption_url = tracks[0].get("baseUrl", "").replace("\\u0026", "&")
-            json_url = caption_url + "&fmt=json3"
-
-            # Test 1: ScraperAPI with session
-            t1 = time.time()
-            c1 = _scraper_fetch(caption_url, session_number=99).strip()
-            results["scraper_session_xml"] = {"len": len(c1), "time": round(time.time() - t1, 1), "preview": c1[:100] if c1 else "(empty)"}
-
-            # Test 2: Direct fetch from server
-            import requests as req
-            t2 = time.time()
-            try:
-                r2 = req.get(caption_url, timeout=15)
-                c2 = r2.text.strip()
-                results["direct_xml"] = {"len": len(c2), "status": r2.status_code, "time": round(time.time() - t2, 1), "preview": c2[:100] if c2 else "(empty)"}
-            except Exception as e2:
-                results["direct_xml"] = {"error": str(e2)}
-
-            # Test 3: Direct fetch JSON format
-            t3 = time.time()
-            try:
-                r3 = req.get(json_url, timeout=15)
-                c3 = r3.text.strip()
-                results["direct_json"] = {"len": len(c3), "status": r3.status_code, "time": round(time.time() - t3, 1), "preview": c3[:100] if c3 else "(empty)"}
-            except Exception as e3:
-                results["direct_json"] = {"error": str(e3)}
-
-            # Test 4: ScraperAPI with keep_headers
-            t4 = time.time()
-            try:
-                r4 = req.get("https://api.scraperapi.com/", params={
-                    "api_key": SCRAPER_API_KEY,
-                    "url": caption_url,
-                    "keep_headers": "true",
-                    "session_number": "99",
-                }, timeout=60, headers={"Accept": "text/xml, application/xml, */*"})
-                c4 = r4.text.strip()
-                results["scraper_keepheaders"] = {"len": len(c4), "time": round(time.time() - t4, 1), "preview": c4[:100] if c4 else "(empty)"}
-            except Exception as e4:
-                results["scraper_keepheaders"] = {"error": str(e4)}
-
+        segments = _fetch_transcript_innertube("dQw4w9WgXcQ")
+        results["innertube_time"] = round(time.time() - t0, 1)
+        results["innertube_segments"] = len(segments)
+        if segments:
+            results["first_segment"] = segments[0]
+            results["last_segment"] = segments[-1]
     except Exception as e:
-        results["error"] = str(e)
+        results["innertube_error"] = str(e)
+        import traceback
+        results["innertube_traceback"] = traceback.format_exc()
     return results
 
 

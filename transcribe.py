@@ -1,12 +1,11 @@
+import base64
 import json
 import logging
 import os
-import random
 import re
 from typing import Optional
 from dataclasses import dataclass
 from html import unescape
-from xml.etree import ElementTree
 
 import requests
 from youtube_transcript_api import (
@@ -18,6 +17,9 @@ from youtube_transcript_api import (
 logger = logging.getLogger(__name__)
 
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
+
+# YouTube's public innertube API key (embedded in every YouTube page)
+INNERTUBE_API_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 
 
 @dataclass
@@ -86,187 +88,184 @@ def extract_youtube_id(url: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# ScraperAPI helper (with session support)
+# ScraperAPI helper
 # ---------------------------------------------------------------------------
 
 def _scraper_fetch(url: str, session_number: Optional[int] = None) -> str:
-    """Fetch a URL via ScraperAPI direct API.
-
-    Use session_number to pin requests to the same proxy IP — critical
-    for YouTube caption URLs which are IP-bound.
-    """
+    """Fetch a URL via ScraperAPI direct API."""
     params = {"api_key": SCRAPER_API_KEY, "url": url}
     if session_number is not None:
         params["session_number"] = str(session_number)
-
-    resp = requests.get(
-        "https://api.scraperapi.com/",
-        params=params,
-        timeout=60,
-    )
+    resp = requests.get("https://api.scraperapi.com/", params=params, timeout=60)
     resp.raise_for_status()
     return resp.text
 
 
-def _clean_caption_url(url: str) -> str:
-    """Ensure all unicode escapes are decoded in caption URLs."""
-    # json.loads handles \u0026 → & but some edge cases leave them.
-    # Belt-and-suspenders cleanup:
-    url = url.replace("\\u0026", "&")
-    url = url.replace("\\u003d", "=")
-    url = url.replace("\\u003f", "?")
-    return url
-
-
 # ---------------------------------------------------------------------------
-# Parse caption segments from JSON or XML
+# YouTube innertube transcript API
 # ---------------------------------------------------------------------------
 
-def _parse_json_captions(content: str) -> list:
-    """Parse YouTube JSON3 caption format."""
-    data = json.loads(content)
+def _build_transcript_params(video_id: str) -> str:
+    """Build the base64-encoded protobuf params for get_transcript API."""
+    # Protobuf encoding for GetTranscriptParams { VideoInfo { video_id } }
+    vid_bytes = video_id.encode("utf-8")
+    inner = b"\x0a" + bytes([len(vid_bytes)]) + vid_bytes  # field 1 = video_id
+    outer = b"\x0a" + bytes([len(inner)]) + inner           # field 1 = VideoInfo
+    return base64.b64encode(outer).decode("ascii")
+
+
+def _fetch_transcript_innertube(video_id: str, via_scraper: bool = False) -> list:
+    """Fetch transcript using YouTube's innertube get_transcript API.
+
+    This is the same API the YouTube website uses for "Show transcript".
+    It doesn't rely on caption URLs (which are IP/session locked).
+    """
+    params_b64 = _build_transcript_params(video_id)
+
+    payload = {
+        "context": {
+            "client": {
+                "clientName": "WEB",
+                "clientVersion": "2.20241120.01.00",
+                "hl": "en",
+            }
+        },
+        "params": params_b64,
+    }
+
+    api_url = f"https://www.youtube.com/youtubei/v1/get_transcript?key={INNERTUBE_API_KEY}"
+
+    if via_scraper and SCRAPER_API_KEY:
+        logger.info("Fetching transcript via innertube API (through ScraperAPI)...")
+        resp = requests.get(
+            "https://api.scraperapi.com/",
+            params={
+                "api_key": SCRAPER_API_KEY,
+                "url": api_url,
+                # ScraperAPI doesn't support POST passthrough easily,
+                # so we'll try direct first
+            },
+            timeout=60,
+        )
+        # ScraperAPI GET won't work for POST endpoint — fall back to direct
+        logger.warning("ScraperAPI GET for innertube not applicable, using direct POST")
+        via_scraper = False
+
+    logger.info("Fetching transcript via innertube API (direct POST)...")
+    resp = requests.post(
+        api_url,
+        json=payload,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    # Parse transcript from innertube response
     segments = []
-    for event in data.get("events", []):
-        start_ms = event.get("tStartMs", 0)
-        segs = event.get("segs", [])
-        text = "".join(s.get("utf8", "") for s in segs).strip()
-        if text and text != "\n":
-            segments.append({"start": start_ms / 1000.0, "text": text})
+
+    # Navigate the response structure
+    actions = data.get("actions", [])
+    for action in actions:
+        panel = action.get("updateEngagementPanelAction", {}).get("content", {})
+        transcript_renderer = panel.get("transcriptRenderer", {})
+        body = transcript_renderer.get("body", {})
+        search_panel = body.get("transcriptSearchPanelRenderer", {})
+        segment_list = search_panel.get("body", {}).get("transcriptSegmentListRenderer", {})
+
+        initial_segments = segment_list.get("initialSegments", [])
+        for seg in initial_segments:
+            segment_renderer = seg.get("transcriptSegmentRenderer", {})
+            start_ms = int(segment_renderer.get("startMs", "0"))
+            end_ms = int(segment_renderer.get("endMs", "0"))
+            snippet = segment_renderer.get("snippet", {})
+
+            # Extract text from snippet runs
+            text_parts = []
+            for run in snippet.get("runs", []):
+                text_parts.append(run.get("text", ""))
+            text = "".join(text_parts).strip()
+
+            if text:
+                segments.append({
+                    "start": start_ms / 1000.0,
+                    "text": text,
+                })
+
     return segments
 
-
-def _parse_xml_captions(content: str) -> list:
-    """Parse YouTube XML caption format."""
-    root = ElementTree.fromstring(content)
-    segments = []
-    for elem in root.findall(".//text"):
-        start = float(elem.get("start", 0))
-        text = unescape(elem.text or "").strip()
-        if text:
-            segments.append({"start": start, "text": text})
-    return segments
-
-
-# ---------------------------------------------------------------------------
-# YouTube captions via ScraperAPI (server-side)
-# ---------------------------------------------------------------------------
 
 def _fetch_captions_via_scraper(video_id: str) -> list:
-    """Fetch YouTube captions by scraping the watch page via ScraperAPI.
+    """Fetch captions by scraping the YouTube page and extracting caption tracks.
 
-    Uses a consistent ScraperAPI session so the page fetch and caption
-    fetch come from the same proxy IP (caption URLs are IP-bound).
+    Uses ScraperAPI to fetch the watch page, finds captionTracks,
+    then tries to fetch caption content.
     """
-    # Use a random session number so concurrent requests don't collide
-    session = random.randint(1, 999999)
-
-    logger.info(f"Fetching YouTube page via ScraperAPI (session={session})...")
-
-    # Step 1: Fetch the YouTube watch page
-    html = _scraper_fetch(
-        f"https://www.youtube.com/watch?v={video_id}",
-        session_number=session,
-    )
+    logger.info("Fetching YouTube page via ScraperAPI for caption tracks...")
+    html = _scraper_fetch(f"https://www.youtube.com/watch?v={video_id}")
     logger.info(f"Page fetched: {len(html)} chars")
 
-    # Step 2: Extract captionTracks from the page's embedded JavaScript
+    # Extract captionTracks
     match = re.search(r'"captionTracks"\s*:\s*(\[.*?\])', html)
     if not match:
-        raise RuntimeError(
-            "No captions are available for this video. "
-            "Only videos with existing captions (auto-generated or manual) are supported."
-        )
-
-    raw_json = match.group(1)
-    logger.info(f"captionTracks JSON found ({len(raw_json)} chars)")
+        raise RuntimeError("No captions found on this video page.")
 
     try:
-        tracks = json.loads(raw_json)
+        tracks = json.loads(match.group(1))
     except json.JSONDecodeError:
-        # Sometimes the JSON has issues; try cleaning unicode escapes first
-        cleaned = raw_json.replace("\\u0026", "&")
-        try:
-            tracks = json.loads(cleaned)
-        except json.JSONDecodeError:
-            raise RuntimeError("Failed to parse caption track data from YouTube.")
+        raise RuntimeError("Failed to parse caption track data.")
 
     if not tracks:
-        raise RuntimeError("No captions are available for this video.")
+        raise RuntimeError("No caption tracks available.")
 
-    logger.info(f"Found {len(tracks)} caption track(s): {[t.get('languageCode','?') for t in tracks]}")
-
-    # Prefer English, fall back to first available
+    # Prefer English
     caption_url = None
     for track in tracks:
         if track.get("languageCode", "").startswith("en"):
-            caption_url = track.get("baseUrl")
+            caption_url = track.get("baseUrl", "").replace("\\u0026", "&")
             break
     if not caption_url:
-        caption_url = tracks[0].get("baseUrl")
+        caption_url = tracks[0].get("baseUrl", "").replace("\\u0026", "&")
 
     if not caption_url:
-        raise RuntimeError("Caption URL not found in track data.")
+        raise RuntimeError("Caption URL not found.")
 
-    # Clean any remaining unicode escapes
-    caption_url = _clean_caption_url(caption_url)
-    logger.info(f"Caption URL (cleaned): {caption_url[:100]}...")
+    logger.info(f"Caption URL found, trying to fetch content...")
 
-    # Step 3: Fetch captions using the SAME ScraperAPI session (same proxy IP)
-    json_url = caption_url + ("&" if "?" in caption_url else "?") + "fmt=json3"
-
+    # Try direct fetch (sometimes works)
     segments = []
-
-    # Try JSON format first, then XML — all via ScraperAPI with same session
-    for fetch_url, fmt, parser in [
-        (json_url, "json3", _parse_json_captions),
-        (caption_url, "xml", _parse_xml_captions),
-    ]:
+    for fmt_param, fmt_name in [("&fmt=json3", "json"), ("", "xml")]:
         try:
-            logger.info(f"Fetching captions ({fmt}) via ScraperAPI (session={session})...")
-            content = _scraper_fetch(fetch_url, session_number=session).strip()
-            logger.info(f"Caption response ({fmt}): {len(content)} chars")
-
+            fetch_url = caption_url + fmt_param
+            resp = requests.get(fetch_url, timeout=15)
+            content = resp.text.strip()
             if not content:
-                logger.warning(f"Empty response for {fmt} format")
                 continue
 
-            segments = parser(content)
-            if segments:
-                logger.info(f"Parsed {len(segments)} segments from {fmt} format")
-                break
+            if fmt_name == "json":
+                data = json.loads(content)
+                for event in data.get("events", []):
+                    start_ms = event.get("tStartMs", 0)
+                    segs = event.get("segs", [])
+                    text = "".join(s.get("utf8", "") for s in segs).strip()
+                    if text and text != "\n":
+                        segments.append({"start": start_ms / 1000.0, "text": text})
             else:
-                logger.warning(f"No segments parsed from {fmt} format")
-        except requests.exceptions.HTTPError as e:
-            logger.warning(f"ScraperAPI caption fetch ({fmt}) HTTP error: {e}")
+                from xml.etree import ElementTree
+                root = ElementTree.fromstring(content)
+                for elem in root.findall(".//text"):
+                    start = float(elem.get("start", 0))
+                    text = unescape(elem.text or "").strip()
+                    if text:
+                        segments.append({"start": start, "text": text})
+
+            if segments:
+                return segments
         except Exception as e:
-            logger.warning(f"ScraperAPI caption fetch ({fmt}) failed: {e}")
-
-    # Fallback: try direct fetch (works for some videos from some IPs)
-    if not segments:
-        logger.info("ScraperAPI session fetch failed, trying direct fetch as fallback...")
-        for fetch_url, fmt, parser in [
-            (json_url, "json3", _parse_json_captions),
-            (caption_url, "xml", _parse_xml_captions),
-        ]:
-            try:
-                resp = requests.get(fetch_url, timeout=15)
-                resp.raise_for_status()
-                content = resp.text.strip()
-                logger.info(f"Direct fetch ({fmt}): {len(content)} chars")
-                if not content:
-                    continue
-                segments = parser(content)
-                if segments:
-                    logger.info(f"Direct fetch worked: {len(segments)} segments from {fmt}")
-                    break
-            except Exception as e:
-                logger.warning(f"Direct caption fetch ({fmt}) failed: {e}")
-
-    if not segments:
-        raise RuntimeError(
-            "Captions were found but could not be downloaded. "
-            "The caption URLs may have expired. Please try again."
-        )
+            logger.warning(f"Caption URL fetch ({fmt_name}) failed: {e}")
 
     return segments
 
@@ -276,7 +275,7 @@ def _fetch_captions_via_scraper(video_id: str) -> list:
 # ---------------------------------------------------------------------------
 
 def _get_metadata(video_id: str) -> dict:
-    """Fetch title and channel via YouTube oEmbed — no API key, no bot detection."""
+    """Fetch title and channel via YouTube oEmbed."""
     try:
         resp = requests.get(
             f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json",
@@ -304,37 +303,69 @@ def transcribe_youtube(url: str) -> TranscriptResult:
 
     logger.info(f"YouTube video ID: {video_id}")
 
-    logger.info("Fetching video metadata...")
     meta = _get_metadata(video_id)
     title = meta["title"]
     channel = meta["channel"]
 
-    logger.info("Fetching captions...")
+    segments = []
+    method = "captions"
+    errors = []
 
-    if SCRAPER_API_KEY:
-        # Server path: use ScraperAPI to bypass YouTube IP blocking
-        segments = _fetch_captions_via_scraper(video_id)
-    else:
-        # Local path: use youtube-transcript-api directly
+    # Strategy 1: Innertube get_transcript API (works from any IP)
+    try:
+        logger.info("Strategy 1: Innertube get_transcript API...")
+        segments = _fetch_transcript_innertube(video_id)
+        if segments:
+            logger.info(f"Innertube API returned {len(segments)} segments")
+            method = "innertube"
+    except Exception as e:
+        logger.warning(f"Innertube API failed: {e}")
+        errors.append(f"innertube: {e}")
+
+    # Strategy 2: youtube-transcript-api library (works from non-blocked IPs)
+    if not segments:
         try:
+            logger.info("Strategy 2: youtube-transcript-api library...")
             entries = YouTubeTranscriptApi.get_transcript(video_id)
             segments = [{"start": e["start"], "text": e["text"]} for e in entries]
-        except (TranscriptsDisabled, NoTranscriptFound):
-            raise RuntimeError(
-                "No captions are available for this video. "
-                "Only videos with existing captions (auto-generated or manual) are supported."
-            )
+            if segments:
+                logger.info(f"youtube-transcript-api returned {len(segments)} segments")
+                method = "yt-transcript-api"
+        except (TranscriptsDisabled, NoTranscriptFound) as e:
+            logger.warning(f"youtube-transcript-api: no captions available: {e}")
+            errors.append(f"yt-api: {e}")
+        except Exception as e:
+            logger.warning(f"youtube-transcript-api failed: {e}")
+            errors.append(f"yt-api: {e}")
+
+    # Strategy 3: ScraperAPI page scraping + caption URL fetch
+    if not segments and SCRAPER_API_KEY:
+        try:
+            logger.info("Strategy 3: ScraperAPI page scraping...")
+            segments = _fetch_captions_via_scraper(video_id)
+            if segments:
+                logger.info(f"ScraperAPI scraping returned {len(segments)} segments")
+                method = "scraper"
+        except Exception as e:
+            logger.warning(f"ScraperAPI scraping failed: {e}")
+            errors.append(f"scraper: {e}")
+
+    if not segments:
+        error_detail = "; ".join(errors) if errors else "unknown"
+        raise RuntimeError(
+            f"Could not fetch captions for this video. "
+            f"The video may not have captions, or YouTube may be blocking access. "
+            f"Details: {error_detail}"
+        )
 
     # Calculate duration from last segment
-    duration_min = 0.0
-    if segments:
-        duration_min = segments[-1]["start"] / 60.0
+    duration_min = segments[-1]["start"] / 60.0 if segments else 0.0
 
-    logger.info(f"Transcription complete: {len(segments)} segments, ~{duration_min:.0f} min")
+    logger.info(f"Transcription complete: {len(segments)} segments, ~{duration_min:.0f} min, method={method}")
     return TranscriptResult(
         title=title, source=channel, date="",
         duration_minutes=duration_min, url=url,
-        segments=segments, method="captions",
+        segments=segments, method=method,
     )
 
 
@@ -381,7 +412,7 @@ def _fetch_spotify_meta(url: str) -> dict:
 
 
 def _search_youtube(query: str) -> Optional[str]:
-    """Search YouTube via scraping — no API key needed."""
+    """Search YouTube via scraping."""
     logger.info(f"Searching YouTube: {query!r}")
     try:
         if SCRAPER_API_KEY:
@@ -407,8 +438,6 @@ def _search_youtube(query: str) -> Optional[str]:
 
 def transcribe_spotify(url: str) -> TranscriptResult:
     logger.info(f"Processing Spotify URL: {url}")
-
-    logger.info("Fetching Spotify episode metadata...")
     meta = _fetch_spotify_meta(url)
     title = meta["title"]
     show_name = meta["show_name"]
@@ -420,7 +449,6 @@ def transcribe_spotify(url: str) -> TranscriptResult:
         )
 
     logger.info(f"Episode: '{title}' | Show: '{show_name}'")
-
     yt_url = _search_youtube(f"{show_name} {title}")
     if not yt_url:
         raise RuntimeError(
