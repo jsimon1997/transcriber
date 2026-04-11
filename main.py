@@ -24,8 +24,8 @@ from transcribe import transcribe_url  # noqa: E402 — after load_dotenv
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 
-def generate_insights(transcript: str, title: str) -> list[str]:
-    """Call Claude to extract 5-10 key insights from a transcript."""
+def generate_insights(transcript: str, title: str, url: str) -> list[dict]:
+    """Call Claude to extract 5 key insights with timestamps from a transcript."""
     if not ANTHROPIC_API_KEY:
         logger.warning("No ANTHROPIC_API_KEY set — skipping insights")
         return []
@@ -47,43 +47,52 @@ def generate_insights(transcript: str, title: str) -> list[str]:
         "or takeaways. Focus on the most valuable, surprising, or actionable "
         "ideas discussed.\n\n"
         "Format EXACTLY like this (no preamble, no closing remarks):\n"
-        "1. **Bold insight headline here**\n"
+        "1. [HH:MM:SS] **Bold insight headline here**\n"
         "   - Supporting detail or example (1 sentence)\n"
         "   - Another supporting detail (1 sentence)\n"
-        "2. **Next insight headline**\n"
+        "2. [HH:MM:SS] **Next insight headline**\n"
         "   - Supporting detail\n"
         "...\n\n"
         "Rules:\n"
         "- Exactly 5 numbered insights\n"
+        "- Each insight MUST start with [HH:MM:SS] — the timestamp from the transcript where this topic is discussed\n"
         "- Each insight has a bold headline (concise, ~10 words)\n"
         "- Each insight has 1-2 supporting bullet points with concrete details from the discussion\n"
-        "- Supporting bullets should add real substance — specific examples, data, quotes, or context"
+        "- Supporting bullets should add real substance — specific examples, data, quotes, or context\n"
+        "- Use the timestamps from the transcript (e.g. [00:15:32]) to reference where the insight appears"
     )
 
     try:
         message = client.messages.create(
-            model="claude-3-5-haiku-latest",
+            model="claude-haiku-4-5-20251001",
             max_tokens=2048,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = message.content[0].text.strip()
+        logger.info(f"Raw insights response:\n{raw}")
 
-        # Parse into structured insights: list of {headline, bullets}
+        # Parse into structured insights: list of {headline, bullets, timestamp}
         insights = []
         current = None
         for line in raw.split("\n"):
             stripped = line.strip()
             if not stripped:
                 continue
-            # Numbered headline: "1. **Something**" or "1. Something"
+            # Numbered headline: "1. [00:15:32] **Something**" or "1. **Something**"
             m = re.match(r"^\d+[\.\)]\s*(.*)", stripped)
             if m:
                 if current:
                     insights.append(current)
-                headline = m.group(1).strip()
+                rest = m.group(1).strip()
+                # Extract timestamp [HH:MM:SS]
+                ts_match = re.match(r"\[(\d{1,2}:\d{2}:\d{2})\]\s*(.*)", rest)
+                timestamp = ""
+                if ts_match:
+                    timestamp = ts_match.group(1)
+                    rest = ts_match.group(2).strip()
                 # Remove bold markdown for clean text
-                headline = re.sub(r"\*\*(.*?)\*\*", r"\1", headline)
-                current = {"headline": headline, "bullets": []}
+                headline = re.sub(r"\*\*(.*?)\*\*", r"\1", rest)
+                current = {"headline": headline, "bullets": [], "timestamp": timestamp}
             # Sub-bullet: "- Something" or "• Something"
             elif re.match(r"^[-•–]\s+", stripped) and current is not None:
                 bullet = re.sub(r"^[-•–]\s+", "", stripped)
@@ -238,6 +247,20 @@ HTML = """<!DOCTYPE html>
     line-height: 1.6;
     margin-bottom: 0.3rem;
   }
+  .insight-timestamp {
+    display: inline-block;
+    font-size: 0.76rem;
+    font-weight: 600;
+    color: #2563eb;
+    background: #eef2ff;
+    padding: 0.1rem 0.45rem;
+    border-radius: 4px;
+    margin-right: 0.4rem;
+    text-decoration: none;
+    cursor: pointer;
+    vertical-align: middle;
+  }
+  .insight-timestamp:hover { background: #dbeafe; }
   .insight-bullets {
     list-style: none;
     padding: 0;
@@ -336,6 +359,7 @@ HTML = """<!DOCTYPE html>
 <script>
 let currentTranscript = '';
 let currentTitle = '';
+let currentUrl = '';
 let transcriptVisible = false;
 
 async function startTranscription() {
@@ -371,6 +395,7 @@ async function startTranscription() {
     } else {
       currentTranscript = data.transcript;
       currentTitle = data.title || 'transcript';
+      currentUrl = data.url || '';
 
       // Meta header
       document.getElementById('result-meta').innerHTML =
@@ -394,7 +419,19 @@ async function startTranscription() {
 
           const headline = document.createElement('div');
           headline.className = 'insight-headline';
-          headline.textContent = insight.headline || insight;
+
+          // Add timestamp link if available
+          if (insight.timestamp) {
+            const tsLink = document.createElement('a');
+            tsLink.className = 'insight-timestamp';
+            tsLink.textContent = insight.timestamp;
+            tsLink.href = buildTimestampUrl(currentUrl, insight.timestamp);
+            tsLink.target = '_blank';
+            tsLink.rel = 'noopener';
+            headline.appendChild(tsLink);
+          }
+
+          headline.appendChild(document.createTextNode(insight.headline || insight));
           div.appendChild(headline);
 
           if (insight.bullets && insight.bullets.length > 0) {
@@ -429,6 +466,22 @@ async function startTranscription() {
     btn.disabled = false;
     spinner.style.display = 'none';
   }
+}
+
+function buildTimestampUrl(url, timestamp) {
+  // Convert HH:MM:SS to total seconds
+  const parts = timestamp.split(':').map(Number);
+  let seconds = 0;
+  if (parts.length === 3) seconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
+  else if (parts.length === 2) seconds = parts[0] * 60 + parts[1];
+  else seconds = parts[0];
+
+  // YouTube URL with timestamp
+  if (url.includes('youtube.com') || url.includes('youtu.be')) {
+    const vidMatch = url.match(/(?:v=|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+    if (vidMatch) return 'https://www.youtube.com/watch?v=' + vidMatch[1] + '&t=' + seconds + 's';
+  }
+  return url;
 }
 
 function toggleTranscript() {
@@ -491,7 +544,7 @@ def transcribe(req: TranscribeRequest):
         result = transcribe_url(req.url)
         logger.info(f"Done: {result['title']} [{result['method']}]")
         # Generate AI insights
-        insights = generate_insights(result["transcript"], result["title"])
+        insights = generate_insights(result["transcript"], result["title"], result["url"])
         result["insights"] = insights
         logger.info(f"Generated {len(insights)} insights")
         return result
