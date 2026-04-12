@@ -247,6 +247,7 @@ def _fetch_captions_ytdlp(video_id: str) -> tuple:
         title = info.get("title", "Unknown Title")
         channel = info.get("uploader", info.get("channel", "Unknown Channel"))
         duration = info.get("duration", 0)
+        upload_date = info.get("upload_date", "")  # YYYYMMDD format
 
         # Find downloaded subtitle files
         sub_files = glob.glob(os.path.join(tmpdir, f"{video_id}.*"))
@@ -294,11 +295,11 @@ def _fetch_captions_ytdlp(video_id: str) -> tuple:
                                     segments = _parse_srv3(resp_data) or _parse_xml_captions(resp_data)
                                 if segments:
                                     logger.info(f"Got {len(segments)} segments from URL ({sub_type}/{lang})")
-                                    return segments, title, channel, duration
+                                    return segments, title, channel, duration, upload_date
                         except Exception as e:
                             logger.warning(f"yt-dlp URL fetch failed: {e}")
 
-    return segments, title, channel, duration
+    return segments, title, channel, duration, upload_date
 
 
 # ---------------------------------------------------------------------------
@@ -346,13 +347,14 @@ def transcribe_youtube(url: str) -> TranscriptResult:
     title = "Unknown Title"
     channel = "Unknown Channel"
     duration = 0
+    upload_date = ""
     method = "unknown"
     errors = []
 
     # Strategy 1: yt-dlp (handles anti-bot, downloads subs properly)
     try:
         logger.info("Strategy 1: yt-dlp subtitle download...")
-        segments, title, channel, duration = _fetch_captions_ytdlp(video_id)
+        segments, title, channel, duration, upload_date = _fetch_captions_ytdlp(video_id)
         if segments:
             method = "yt-dlp"
     except Exception as e:
@@ -388,9 +390,14 @@ def transcribe_youtube(url: str) -> TranscriptResult:
 
     duration_min = duration / 60.0 if duration else (segments[-1]["start"] / 60.0 if segments else 0)
 
-    logger.info(f"Done: {len(segments)} segments, ~{duration_min:.0f} min, method={method}")
+    # Format upload date from YYYYMMDD to YYYY-MM-DD
+    formatted_date = ""
+    if upload_date and len(upload_date) == 8:
+        formatted_date = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
+
+    logger.info(f"Done: {len(segments)} segments, ~{duration_min:.0f} min, method={method}, date={formatted_date}")
     return TranscriptResult(
-        title=title, source=channel, date="",
+        title=title, source=channel, date=formatted_date,
         duration_minutes=duration_min, url=url,
         segments=segments, method=method,
     )

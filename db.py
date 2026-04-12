@@ -133,8 +133,8 @@ def get_all_episodes() -> list[dict]:
     for ep in episodes:
         item = {k: v for k, v in ep.items() if k != "transcript"}
         feed.append(item)
-    # Sort by created_at descending
-    feed.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    # Sort by video release date descending (latest first), fall back to created_at
+    feed.sort(key=lambda x: x.get("video_date", "") or x.get("created_at", ""), reverse=True)
     return feed
 
 

@@ -594,95 +594,194 @@ FEED_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>My Podcast Feed</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: #f3f4f6;
-    color: #111;
-    padding: 2rem 1rem;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
     min-height: 100vh;
   }
-  .container { max-width: 820px; margin: 0 auto; }
-  .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.5rem; }
-  h1 { font-size: 1.4rem; font-weight: 700; }
-  a.nav-link {
-    font-size: 0.88rem;
-    color: #2563eb;
-    text-decoration: none;
-    font-weight: 600;
+
+  /* Hero header */
+  .hero {
+    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    border-bottom: 1px solid #1e293b;
+    padding: 2rem 1rem 1.5rem;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    backdrop-filter: blur(12px);
   }
-  a.nav-link:hover { text-decoration: underline; }
+  .hero-inner { max-width: 880px; margin: 0 auto; }
+  .hero h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #f8fafc;
+    letter-spacing: -0.02em;
+    margin-bottom: 1rem;
+  }
+  .hero h1 span { color: #818cf8; }
+
+  /* Add bar */
+  .add-bar {
+    display: flex;
+    gap: 0.5rem;
+  }
+  .add-bar input {
+    flex: 1;
+    padding: 0.7rem 1rem;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    font-size: 0.9rem;
+    color: #e2e8f0;
+    outline: none;
+    font-family: inherit;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .add-bar input::placeholder { color: #64748b; }
+  .add-bar input:focus { border-color: #818cf8; box-shadow: 0 0 0 3px rgba(129,140,248,0.2); }
+  .add-bar button {
+    padding: 0.7rem 1.5rem;
+    background: linear-gradient(135deg, #6366f1, #818cf8);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    font-family: inherit;
+    transition: opacity 0.15s;
+  }
+  .add-bar button:hover:not(:disabled) { opacity: 0.9; }
+  .add-bar button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #add-status {
+    font-size: 0.8rem;
+    min-height: 1.2rem;
+    color: #94a3b8;
+    margin-top: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  #add-status.error { color: #f87171; }
+  .add-spinner {
+    display: none;
+    width: 12px; height: 12px;
+    border: 2px solid #475569;
+    border-top-color: #818cf8;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Feed container */
+  .container { max-width: 880px; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
   .empty-state {
     text-align: center;
-    padding: 3rem 1rem;
-    color: #9ca3af;
+    padding: 4rem 1rem;
+    color: #64748b;
     font-size: 0.95rem;
   }
+  .empty-state a { color: #818cf8; }
 
   /* Episode card */
   .episode-card {
-    background: #fff;
-    border: 1px solid #e5e7eb;
-    border-radius: 10px;
-    margin-bottom: 1.2rem;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 14px;
+    margin-bottom: 1.5rem;
     overflow: hidden;
-    transition: box-shadow 0.15s;
+    transition: border-color 0.2s, box-shadow 0.2s;
   }
-  .episode-card:hover { box-shadow: 0 3px 12px rgba(0,0,0,0.08); }
+  .episode-card:hover {
+    border-color: #475569;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+  }
 
-  /* Thumbnail banner */
+  /* Thumbnail */
+  .ep-thumb-wrap {
+    position: relative;
+    overflow: hidden;
+  }
   .ep-thumb {
     width: 100%;
-    aspect-ratio: 16/7;
+    aspect-ratio: 16/8;
     object-fit: cover;
     display: block;
-    background: #e5e7eb;
+    background: #334155;
+    transition: transform 0.3s;
+  }
+  .episode-card:hover .ep-thumb { transform: scale(1.02); }
+  .ep-thumb-overlay {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 50%;
+    background: linear-gradient(transparent, rgba(15,23,42,0.85));
+    pointer-events: none;
+  }
+  .ep-date-float {
+    position: absolute;
+    top: 0.75rem;
+    right: 0.75rem;
+    background: rgba(15,23,42,0.75);
+    backdrop-filter: blur(6px);
+    color: #e2e8f0;
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 0.25rem 0.6rem;
+    border-radius: 6px;
+    letter-spacing: 0.02em;
+  }
+  .ep-duration-float {
+    position: absolute;
+    bottom: 0.75rem;
+    right: 0.75rem;
+    background: rgba(0,0,0,0.7);
+    color: #e2e8f0;
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
   }
 
   .ep-header {
-    padding: 0.9rem 1rem 0.5rem;
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 0.8rem;
+    padding: 1rem 1.1rem 0.5rem;
   }
   .ep-title {
-    font-size: 0.95rem;
+    font-size: 1rem;
     font-weight: 600;
-    color: #111;
+    color: #f1f5f9;
     line-height: 1.4;
+    letter-spacing: -0.01em;
   }
   .ep-meta {
     font-size: 0.78rem;
-    color: #6b7280;
-    margin-top: 0.2rem;
-  }
-  .ep-date-badge {
-    font-size: 0.72rem;
-    background: #f3f4f6;
-    color: #6b7280;
-    padding: 0.2rem 0.5rem;
-    border-radius: 4px;
-    white-space: nowrap;
-    flex-shrink: 0;
+    color: #94a3b8;
+    margin-top: 0.25rem;
   }
 
   /* Insights */
-  .ep-insights { padding: 0.4rem 1rem 0.6rem; }
+  .ep-insights { padding: 0.3rem 1.1rem 0.5rem; }
   .insight-row {
     display: flex;
     align-items: flex-start;
-    gap: 0.5rem;
-    padding: 0.3rem 0;
+    gap: 0.55rem;
+    padding: 0.35rem 0;
   }
   .insight-num-sm {
-    width: 1.3rem;
-    height: 1.3rem;
-    background: #2563eb;
+    width: 1.25rem;
+    height: 1.25rem;
+    background: linear-gradient(135deg, #6366f1, #818cf8);
     color: #fff;
     border-radius: 50%;
-    font-size: 0.65rem;
+    font-size: 0.62rem;
     font-weight: 700;
     display: flex;
     align-items: center;
@@ -692,30 +791,33 @@ FEED_HTML = """<!DOCTYPE html>
   }
   .insight-content { flex: 1; min-width: 0; }
   .insight-headline {
-    font-size: 0.85rem;
+    font-size: 0.84rem;
     line-height: 1.5;
-    color: #1f2937;
+    color: #cbd5e1;
     cursor: pointer;
     display: flex;
     align-items: baseline;
-    gap: 0.3rem;
+    gap: 0.35rem;
+    user-select: none;
   }
+  .insight-headline:hover { color: #f1f5f9; }
   .insight-headline .ts-badge {
     display: inline-block;
-    font-size: 0.72rem;
+    font-size: 0.68rem;
     font-weight: 600;
-    color: #2563eb;
-    background: #eef2ff;
-    padding: 0.05rem 0.35rem;
-    border-radius: 3px;
+    color: #a5b4fc;
+    background: rgba(99,102,241,0.15);
+    padding: 0.1rem 0.4rem;
+    border-radius: 4px;
     text-decoration: none;
     flex-shrink: 0;
+    border: 1px solid rgba(99,102,241,0.25);
   }
-  .insight-headline .ts-badge:hover { background: #dbeafe; }
+  .insight-headline .ts-badge:hover { background: rgba(99,102,241,0.25); }
   .insight-toggle {
-    color: #9ca3af;
-    font-size: 0.7rem;
-    margin-left: 0.2rem;
+    color: #64748b;
+    font-size: 0.65rem;
+    margin-left: 0.15rem;
     transition: transform 0.2s;
     display: inline-block;
   }
@@ -731,111 +833,69 @@ FEED_HTML = """<!DOCTYPE html>
     padding-top: 0.25rem;
   }
   .insight-sub {
-    font-size: 0.8rem;
-    color: #6b7280;
+    font-size: 0.78rem;
+    color: #94a3b8;
     padding-left: 0.1rem;
-    line-height: 1.45;
+    line-height: 1.5;
     margin-bottom: 0.1rem;
   }
-  .insight-sub::before { content: "\\2013\\00a0"; color: #d1d5db; }
+  .insight-sub::before { content: "\\2013\\00a0"; color: #475569; }
 
-  /* Actions */
+  /* Actions bar */
   .ep-actions {
-    padding: 0.3rem 1rem 0.7rem;
+    padding: 0.4rem 1.1rem 0.9rem;
     display: flex;
-    gap: 0.8rem;
+    gap: 1rem;
+    border-top: 1px solid #1e293b;
+    margin-top: 0.2rem;
   }
   .ep-actions a, .ep-actions button {
     font-size: 0.78rem;
-    color: #2563eb;
+    color: #818cf8;
     text-decoration: none;
     cursor: pointer;
     background: none;
     border: none;
     font-weight: 600;
+    font-family: inherit;
+    padding: 0;
   }
-  .ep-actions a:hover, .ep-actions button:hover { text-decoration: underline; }
+  .ep-actions a:hover, .ep-actions button:hover { color: #a5b4fc; }
   .transcript-expand {
     display: none;
-    padding: 0 1rem 1rem;
+    padding: 0 1.1rem 1rem;
   }
   .transcript-expand pre {
     white-space: pre-wrap;
-    font-family: "SFMono-Regular", Consolas, monospace;
-    font-size: 0.78rem;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    font-size: 0.76rem;
     line-height: 1.6;
     max-height: 50vh;
     overflow-y: auto;
-    background: #f9fafb;
-    padding: 0.8rem;
-    border-radius: 6px;
-    color: #374151;
+    background: #0f172a;
+    padding: 1rem;
+    border-radius: 8px;
+    color: #94a3b8;
+    border: 1px solid #1e293b;
   }
-  .loading { text-align: center; padding: 2rem; color: #9ca3af; }
-
-  /* Add new podcast bar */
-  .add-bar {
-    display: flex;
-    gap: 0.5rem;
-    margin-bottom: 1.2rem;
-  }
-  .add-bar input {
-    flex: 1;
-    padding: 0.6rem 0.85rem;
-    border: 1px solid #d1d5db;
-    border-radius: 6px;
-    font-size: 0.9rem;
-    outline: none;
-    transition: border-color 0.15s;
-  }
-  .add-bar input:focus { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.15); }
-  .add-bar button {
-    padding: 0.6rem 1.2rem;
-    background: #2563eb;
-    color: #fff;
-    border: none;
-    border-radius: 6px;
-    font-size: 0.9rem;
-    font-weight: 600;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .add-bar button:hover:not(:disabled) { background: #1d4ed8; }
-  .add-bar button:disabled { background: #93c5fd; cursor: not-allowed; }
-  #add-status {
-    font-size: 0.82rem;
-    min-height: 1.3rem;
-    color: #555;
-    margin: -0.6rem 0 0.8rem;
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-  }
-  #add-status.error { color: #dc2626; }
-  .add-spinner {
-    display: none;
-    width: 12px; height: 12px;
-    border: 2px solid #ccc;
-    border-top-color: #2563eb;
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading { text-align: center; padding: 3rem; color: #64748b; }
 </style>
 </head>
 <body>
+<div class="hero">
+  <div class="hero-inner">
+    <h1>My <span>Podcast</span> Feed</h1>
+    <div class="add-bar">
+      <input type="text" id="add-url" placeholder="Paste a YouTube or Spotify URL..." />
+      <button id="add-btn" onclick="addPodcast()">Add</button>
+    </div>
+    <div id="add-status">
+      <span class="add-spinner" id="add-spinner"></span>
+      <span id="add-status-text"></span>
+    </div>
+  </div>
+</div>
 <div class="container">
-  <div class="header">
-    <h1>My Podcast Feed</h1>
-  </div>
-  <div class="add-bar">
-    <input type="text" id="add-url" placeholder="Paste a YouTube or Spotify URL to add to your feed..." />
-    <button id="add-btn" onclick="addPodcast()">Add</button>
-  </div>
-  <div id="add-status">
-    <span class="add-spinner" id="add-spinner"></span>
-    <span id="add-status-text"></span>
-  </div>
   <div id="feed">
     <div class="loading">Loading your feed...</div>
   </div>
@@ -898,15 +958,25 @@ async function loadFeed() {
           + '</div>';
       }).join('');
 
-      const dateStr = ep.created_at ? new Date(ep.created_at).toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'}) : '';
+      // Use video release date if available, otherwise created_at
+      const rawDate = ep.video_date || ep.created_at;
+      const dateStr = rawDate ? new Date(rawDate).toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'}) : '';
+      const durationStr = ep.duration_minutes ? Math.round(ep.duration_minutes) + ' min' : '';
+
+      const thumbHtml = thumbUrl
+        ? '<a href="' + esc(ep.url) + '" target="_blank" class="ep-thumb-wrap">'
+          + '<img class="ep-thumb" src="' + esc(thumbUrl) + '" alt="" loading="lazy">'
+          + '<div class="ep-thumb-overlay"></div>'
+          + (dateStr ? '<span class="ep-date-float">' + esc(dateStr) + '</span>' : '')
+          + (durationStr ? '<span class="ep-duration-float">' + esc(durationStr) + '</span>' : '')
+          + '</a>'
+        : '';
 
       return '<div class="episode-card">'
-        + (thumbUrl ? '<a href="' + esc(ep.url) + '" target="_blank"><img class="ep-thumb" src="' + esc(thumbUrl) + '" alt="" loading="lazy"></a>' : '')
-        + '<div class="ep-header"><div>'
+        + thumbHtml
+        + '<div class="ep-header">'
         + '<div class="ep-title">' + esc(ep.title) + '</div>'
-        + '<div class="ep-meta">' + esc(ep.source) + (ep.duration_minutes ? ' &middot; ' + Math.round(ep.duration_minutes) + ' min' : '') + '</div>'
-        + '</div>'
-        + (dateStr ? '<span class="ep-date-badge">' + esc(dateStr) + '</span>' : '')
+        + '<div class="ep-meta">' + esc(ep.source) + '</div>'
         + '</div>'
         + (insightsHtml ? '<div class="ep-insights">' + insightsHtml + '</div>' : '')
         + '<div class="ep-actions">'
