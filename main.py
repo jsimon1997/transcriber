@@ -619,18 +619,29 @@ FEED_HTML = """<!DOCTYPE html>
     color: #9ca3af;
     font-size: 0.95rem;
   }
+
+  /* Episode card */
   .episode-card {
     background: #fff;
     border: 1px solid #e5e7eb;
-    border-radius: 8px;
-    margin-bottom: 1rem;
+    border-radius: 10px;
+    margin-bottom: 1.2rem;
     overflow: hidden;
     transition: box-shadow 0.15s;
   }
-  .episode-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+  .episode-card:hover { box-shadow: 0 3px 12px rgba(0,0,0,0.08); }
+
+  /* Thumbnail banner */
+  .ep-thumb {
+    width: 100%;
+    aspect-ratio: 16/7;
+    object-fit: cover;
+    display: block;
+    background: #e5e7eb;
+  }
+
   .ep-header {
-    padding: 0.9rem 1rem;
-    border-bottom: 1px solid #f3f4f6;
+    padding: 0.9rem 1rem 0.5rem;
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
@@ -656,14 +667,14 @@ FEED_HTML = """<!DOCTYPE html>
     white-space: nowrap;
     flex-shrink: 0;
   }
-  .ep-insights {
-    padding: 0.6rem 1rem 0.8rem;
-  }
+
+  /* Insights */
+  .ep-insights { padding: 0.4rem 1rem 0.6rem; }
   .insight-row {
     display: flex;
     align-items: flex-start;
     gap: 0.5rem;
-    padding: 0.35rem 0;
+    padding: 0.3rem 0;
   }
   .insight-num-sm {
     width: 1.3rem;
@@ -677,14 +688,19 @@ FEED_HTML = """<!DOCTYPE html>
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    margin-top: 0.1rem;
+    margin-top: 0.15rem;
   }
-  .insight-text {
+  .insight-content { flex: 1; min-width: 0; }
+  .insight-headline {
     font-size: 0.85rem;
     line-height: 1.5;
     color: #1f2937;
+    cursor: pointer;
+    display: flex;
+    align-items: baseline;
+    gap: 0.3rem;
   }
-  .insight-text .ts-badge {
+  .insight-headline .ts-badge {
     display: inline-block;
     font-size: 0.72rem;
     font-weight: 600;
@@ -692,21 +708,42 @@ FEED_HTML = """<!DOCTYPE html>
     background: #eef2ff;
     padding: 0.05rem 0.35rem;
     border-radius: 3px;
-    margin-right: 0.3rem;
     text-decoration: none;
+    flex-shrink: 0;
   }
-  .insight-text .ts-badge:hover { background: #dbeafe; }
+  .insight-headline .ts-badge:hover { background: #dbeafe; }
+  .insight-toggle {
+    color: #9ca3af;
+    font-size: 0.7rem;
+    margin-left: 0.2rem;
+    transition: transform 0.2s;
+    display: inline-block;
+  }
+  .insight-toggle.open { transform: rotate(90deg); }
+  .insight-bullets {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.25s ease, padding 0.25s ease;
+    padding-top: 0;
+  }
+  .insight-bullets.open {
+    max-height: 10rem;
+    padding-top: 0.25rem;
+  }
   .insight-sub {
     font-size: 0.8rem;
     color: #6b7280;
-    padding-left: 1.8rem;
+    padding-left: 0.1rem;
     line-height: 1.45;
+    margin-bottom: 0.1rem;
   }
-  .insight-sub::before { content: "- "; color: #d1d5db; }
+  .insight-sub::before { content: "\\2013\\00a0"; color: #d1d5db; }
+
+  /* Actions */
   .ep-actions {
-    padding: 0 1rem 0.7rem;
+    padding: 0.3rem 1rem 0.7rem;
     display: flex;
-    gap: 0.5rem;
+    gap: 0.8rem;
   }
   .ep-actions a, .ep-actions button {
     font-size: 0.78rem;
@@ -748,18 +785,29 @@ FEED_HTML = """<!DOCTYPE html>
   </div>
 </div>
 <script>
+function getVideoId(url) {
+  const m = url.match(/(?:v=|youtu\\.be\\/)([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : null;
+}
 function buildTsUrl(url, timestamp) {
   if (!timestamp) return url;
   const parts = timestamp.split(':').map(Number);
   let s = 0;
   if (parts.length === 3) s = parts[0]*3600 + parts[1]*60 + parts[2];
   else if (parts.length === 2) s = parts[0]*60 + parts[1];
-  const m = url.match(/(?:v=|youtu\\.be\\/)([A-Za-z0-9_-]{11})/);
-  if (m) return 'https://www.youtube.com/watch?v=' + m[1] + '&t=' + s + 's';
+  const vid = getVideoId(url);
+  if (vid) return 'https://www.youtube.com/watch?v=' + vid + '&t=' + s + 's';
   return url;
 }
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function toggleBullets(el) {
+  const bullets = el.closest('.insight-content').querySelector('.insight-bullets');
+  const arrow = el.querySelector('.insight-toggle');
+  if (!bullets) return;
+  bullets.classList.toggle('open');
+  arrow.classList.toggle('open');
 }
 
 async function loadFeed() {
@@ -773,20 +821,31 @@ async function loadFeed() {
     }
     container.innerHTML = episodes.map((ep, idx) => {
       const insights = ep.insights || [];
+      const vid = getVideoId(ep.url);
+      const thumbUrl = vid ? 'https://img.youtube.com/vi/' + vid + '/hqdefault.jpg' : '';
+
       const insightsHtml = insights.map((ins, i) => {
         const ts = ins.timestamp
-          ? '<a class="ts-badge" href="' + esc(buildTsUrl(ep.url, ins.timestamp)) + '" target="_blank">' + esc(ins.timestamp) + '</a>'
+          ? '<a class="ts-badge" href="' + esc(buildTsUrl(ep.url, ins.timestamp)) + '" target="_blank" onclick="event.stopPropagation()">' + esc(ins.timestamp) + '</a>'
           : '';
-        const bulletsHtml = (ins.bullets || []).map(b => '<div class="insight-sub">' + esc(b) + '</div>').join('');
+        const hasBullets = ins.bullets && ins.bullets.length > 0;
+        const arrow = hasBullets ? '<span class="insight-toggle">&#9654;</span>' : '';
+        const bulletsHtml = hasBullets
+          ? '<div class="insight-bullets">' + ins.bullets.map(b => '<div class="insight-sub">' + esc(b) + '</div>').join('') + '</div>'
+          : '';
         return '<div class="insight-row">'
           + '<span class="insight-num-sm">' + (i+1) + '</span>'
-          + '<div><div class="insight-text">' + ts + esc(ins.headline || ins) + '</div>' + bulletsHtml + '</div>'
+          + '<div class="insight-content">'
+          + '<div class="insight-headline" onclick="toggleBullets(this)">' + ts + esc(ins.headline || ins) + ' ' + arrow + '</div>'
+          + bulletsHtml
+          + '</div>'
           + '</div>';
       }).join('');
 
       const dateStr = ep.created_at ? new Date(ep.created_at).toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'}) : '';
 
       return '<div class="episode-card">'
+        + (thumbUrl ? '<a href="' + esc(ep.url) + '" target="_blank"><img class="ep-thumb" src="' + esc(thumbUrl) + '" alt="" loading="lazy"></a>' : '')
         + '<div class="ep-header"><div>'
         + '<div class="ep-title">' + esc(ep.title) + '</div>'
         + '<div class="ep-meta">' + esc(ep.source) + (ep.duration_minutes ? ' &middot; ' + Math.round(ep.duration_minutes) + ' min' : '') + '</div>'
