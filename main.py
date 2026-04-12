@@ -772,13 +772,69 @@ FEED_HTML = """<!DOCTYPE html>
     color: #374151;
   }
   .loading { text-align: center; padding: 2rem; color: #9ca3af; }
+
+  /* Add new podcast bar */
+  .add-bar {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1.2rem;
+  }
+  .add-bar input {
+    flex: 1;
+    padding: 0.6rem 0.85rem;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .add-bar input:focus { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.15); }
+  .add-bar button {
+    padding: 0.6rem 1.2rem;
+    background: #2563eb;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .add-bar button:hover:not(:disabled) { background: #1d4ed8; }
+  .add-bar button:disabled { background: #93c5fd; cursor: not-allowed; }
+  #add-status {
+    font-size: 0.82rem;
+    min-height: 1.3rem;
+    color: #555;
+    margin: -0.6rem 0 0.8rem;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  #add-status.error { color: #dc2626; }
+  .add-spinner {
+    display: none;
+    width: 12px; height: 12px;
+    border: 2px solid #ccc;
+    border-top-color: #2563eb;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
 <div class="container">
   <div class="header">
     <h1>My Podcast Feed</h1>
-    <a class="nav-link" href="/">+ Transcribe New</a>
+  </div>
+  <div class="add-bar">
+    <input type="text" id="add-url" placeholder="Paste a YouTube or Spotify URL to add to your feed..." />
+    <button id="add-btn" onclick="addPodcast()">Add</button>
+  </div>
+  <div id="add-status">
+    <span class="add-spinner" id="add-spinner"></span>
+    <span id="add-status-text"></span>
   </div>
   <div id="feed">
     <div class="loading">Loading your feed...</div>
@@ -822,7 +878,7 @@ async function loadFeed() {
     container.innerHTML = episodes.map((ep, idx) => {
       const insights = ep.insights || [];
       const vid = getVideoId(ep.url);
-      const thumbUrl = vid ? 'https://img.youtube.com/vi/' + vid + '/hqdefault.jpg' : '';
+      const thumbUrl = vid ? 'https://img.youtube.com/vi/' + vid + '/maxresdefault.jpg' : '';
 
       const insightsHtml = insights.map((ins, i) => {
         const ts = ins.timestamp
@@ -884,6 +940,48 @@ async function toggleTx(btn, id) {
     el.querySelector('pre').textContent = 'Failed to load: ' + e.message;
   }
 }
+
+async function addPodcast() {
+  const url = document.getElementById('add-url').value.trim();
+  if (!url) return;
+  const btn = document.getElementById('add-btn');
+  const spinner = document.getElementById('add-spinner');
+  const statusText = document.getElementById('add-status-text');
+  const statusEl = document.getElementById('add-status');
+
+  btn.disabled = true;
+  spinner.style.display = 'block';
+  statusText.textContent = 'Transcribing... (may take a few minutes)';
+  statusEl.className = '';
+
+  try {
+    const resp = await fetch('/transcribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      statusText.textContent = data.error || 'Unknown error.';
+      statusEl.className = 'error';
+    } else {
+      statusText.textContent = 'Added! Refreshing feed...';
+      document.getElementById('add-url').value = '';
+      await loadFeed();
+      statusText.textContent = '';
+    }
+  } catch(e) {
+    statusText.textContent = 'Failed: ' + e.message;
+    statusEl.className = 'error';
+  } finally {
+    btn.disabled = false;
+    spinner.style.display = 'none';
+  }
+}
+
+document.getElementById('add-url').addEventListener('keydown', e => {
+  if (e.key === 'Enter') addPodcast();
+});
 
 loadFeed();
 </script>
