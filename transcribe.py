@@ -14,6 +14,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
+ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY", "")
 
 
 @dataclass
@@ -65,7 +66,7 @@ def is_youtube_url(url: str) -> bool:
 
 
 def is_spotify_url(url: str) -> bool:
-    return "open.spotify.com/episode" in url
+    return "open.spotify.com/episode" in url or "open.spotify.com/show" in url
 
 
 def extract_youtube_id(url: str) -> Optional[str]:
@@ -490,6 +491,142 @@ def _search_youtube(query: str) -> Optional[str]:
     return None
 
 
+def _find_rss_audio(show_name: str, episode_title: str) -> Optional[dict]:
+    """Try to find the podcast episode audio URL via iTunes/RSS."""
+    import xml.etree.ElementTree as ET
+
+    logger.info(f"Searching iTunes for RSS feed: {show_name}")
+    try:
+        # Search iTunes API for the podcast
+        resp = requests.get(
+            "https://itunes.apple.com/search",
+            params={"term": show_name, "media": "podcast", "limit": 5},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+
+        for pod in results:
+            feed_url = pod.get("feedUrl")
+            if not feed_url:
+                continue
+
+            logger.info(f"Checking RSS feed: {feed_url}")
+            try:
+                feed_resp = requests.get(feed_url, timeout=20, headers={
+                    "User-Agent": "Mozilla/5.0",
+                })
+                feed_resp.raise_for_status()
+                root = ET.fromstring(feed_resp.content)
+
+                # Search episodes for a title match
+                ns = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
+                for item in root.findall(".//item"):
+                    item_title = item.findtext("title", "")
+                    # Fuzzy match: check if most words from the episode title appear
+                    title_words = set(episode_title.lower().split())
+                    item_words = set(item_title.lower().split())
+                    overlap = len(title_words & item_words)
+                    if overlap >= max(2, len(title_words) * 0.5):
+                        enclosure = item.find("enclosure")
+                        if enclosure is not None:
+                            audio_url = enclosure.get("url", "")
+                            if audio_url:
+                                pub_date = item.findtext("pubDate", "")
+                                duration_text = item.findtext("itunes:duration", "", ns)
+                                logger.info(f"Found RSS audio match: {item_title}")
+                                return {
+                                    "audio_url": audio_url,
+                                    "title": item_title,
+                                    "show": pod.get("collectionName", show_name),
+                                    "pub_date": pub_date,
+                                    "duration_text": duration_text,
+                                }
+            except Exception as e:
+                logger.warning(f"RSS feed parse failed for {feed_url}: {e}")
+                continue
+    except Exception as e:
+        logger.warning(f"iTunes search failed: {e}")
+    return None
+
+
+def _transcribe_audio_assemblyai(audio_url: str) -> list:
+    """Transcribe an audio URL using AssemblyAI. Returns segments."""
+    if not ASSEMBLYAI_API_KEY:
+        raise RuntimeError("No ASSEMBLYAI_API_KEY set — cannot transcribe audio")
+
+    headers = {"authorization": ASSEMBLYAI_API_KEY, "content-type": "application/json"}
+    api_base = "https://api.assemblyai.com/v2"
+
+    logger.info(f"Submitting audio to AssemblyAI: {audio_url[:80]}...")
+    # Submit transcription job
+    resp = requests.post(
+        f"{api_base}/transcript",
+        headers=headers,
+        json={"audio_url": audio_url, "language_code": "en"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    transcript_id = resp.json()["id"]
+    logger.info(f"AssemblyAI job submitted: {transcript_id}")
+
+    # Poll for completion
+    import time
+    for _ in range(180):  # up to 30 minutes
+        time.sleep(10)
+        resp = requests.get(f"{api_base}/transcript/{transcript_id}", headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        status = data["status"]
+        if status == "completed":
+            logger.info(f"AssemblyAI transcription complete: {len(data.get('words', []))} words")
+            # Convert to segments (group by sentences)
+            segments = []
+            for utt in data.get("utterances", []) or []:
+                segments.append({
+                    "start": utt["start"] / 1000.0,
+                    "text": utt["text"],
+                })
+            # Fallback: if no utterances, use words grouped in chunks
+            if not segments and data.get("words"):
+                chunk = []
+                chunk_start = 0
+                for w in data["words"]:
+                    if not chunk:
+                        chunk_start = w["start"] / 1000.0
+                    chunk.append(w["text"])
+                    if w.get("text", "").endswith((".", "!", "?")) or len(chunk) >= 30:
+                        segments.append({"start": chunk_start, "text": " ".join(chunk)})
+                        chunk = []
+                if chunk:
+                    segments.append({"start": chunk_start, "text": " ".join(chunk)})
+            # Last fallback: single block
+            if not segments and data.get("text"):
+                segments.append({"start": 0, "text": data["text"]})
+            return segments
+        elif status == "error":
+            raise RuntimeError(f"AssemblyAI error: {data.get('error', 'unknown')}")
+        logger.info(f"AssemblyAI status: {status}...")
+
+    raise RuntimeError("AssemblyAI transcription timed out")
+
+
+def _parse_duration_text(text: str) -> float:
+    """Parse duration like '01:23:45' or '3600' into minutes."""
+    if not text:
+        return 0
+    if ":" in text:
+        parts = text.split(":")
+        if len(parts) == 3:
+            return int(parts[0]) * 60 + int(parts[1]) + int(parts[2]) / 60
+        elif len(parts) == 2:
+            return int(parts[0]) + int(parts[1]) / 60
+    try:
+        return int(text) / 60  # seconds
+    except ValueError:
+        return 0
+
+
 def transcribe_spotify(url: str) -> TranscriptResult:
     logger.info(f"Processing Spotify URL: {url}")
     meta = _fetch_spotify_meta(url)
@@ -499,20 +636,68 @@ def transcribe_spotify(url: str) -> TranscriptResult:
     if not title:
         raise ValueError(
             "Could not read episode info from Spotify. "
-            "Please check the URL is correct, or try pasting the YouTube URL directly "
-            "if this podcast is also on YouTube."
+            "Please check the URL is correct."
         )
 
+    # Strategy 1: Find on YouTube (fastest — uses existing captions)
+    logger.info("Spotify strategy 1: search YouTube...")
     yt_url = _search_youtube(f"{show_name} {title}")
-    if not yt_url:
-        raise RuntimeError(
-            f"Could not find this episode on YouTube.\n"
-            f"Show: {show_name}\nEpisode: {title}"
-        )
+    if yt_url:
+        try:
+            result = transcribe_youtube(yt_url)
+            result.url = url
+            return result
+        except Exception as e:
+            logger.warning(f"YouTube transcription failed: {e}")
 
-    result = transcribe_youtube(yt_url)
-    result.url = url
-    return result
+    # Strategy 2: Find RSS feed audio → transcribe with AssemblyAI
+    logger.info("Spotify strategy 2: RSS feed + AssemblyAI...")
+    rss_info = _find_rss_audio(show_name, title)
+    if rss_info and ASSEMBLYAI_API_KEY:
+        try:
+            segments = _transcribe_audio_assemblyai(rss_info["audio_url"])
+            if segments:
+                duration_min = _parse_duration_text(rss_info.get("duration_text", ""))
+                if not duration_min and segments:
+                    duration_min = segments[-1]["start"] / 60.0
+
+                # Parse pub_date
+                pub_date = ""
+                raw_date = rss_info.get("pub_date", "")
+                if raw_date:
+                    try:
+                        from email.utils import parsedate_to_datetime
+                        dt = parsedate_to_datetime(raw_date)
+                        pub_date = dt.strftime("%Y-%m-%d")
+                    except Exception:
+                        pass
+
+                return TranscriptResult(
+                    title=rss_info.get("title", title),
+                    source=rss_info.get("show", show_name),
+                    date=pub_date,
+                    duration_minutes=duration_min,
+                    url=url,
+                    segments=segments,
+                    method="assemblyai",
+                )
+        except Exception as e:
+            logger.error(f"AssemblyAI transcription failed: {e}")
+
+    # Nothing worked
+    errors = []
+    if not yt_url:
+        errors.append("not found on YouTube")
+    if not rss_info:
+        errors.append("RSS feed not found")
+    elif not ASSEMBLYAI_API_KEY:
+        errors.append("no ASSEMBLYAI_API_KEY for audio transcription")
+
+    raise RuntimeError(
+        f"Could not transcribe this Spotify episode.\n"
+        f"Show: {show_name}\nEpisode: {title}\n"
+        f"Tried: {', '.join(errors)}"
+    )
 
 
 # ---------------------------------------------------------------------------
