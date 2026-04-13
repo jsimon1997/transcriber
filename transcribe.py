@@ -414,11 +414,25 @@ def _fetch_spotify_meta(url: str) -> dict:
     Uses ScraperAPI if available (Spotify blocks direct access from cloud IPs),
     falls back to direct fetch.
     """
+    def _fix_mojibake(s: str) -> str:
+        """Undo UTF-8 bytes mis-decoded as Latin-1 then re-encoded as UTF-8."""
+        if not s:
+            return s
+        try:
+            fixed = s.encode("latin-1").decode("utf-8")
+            # Only use if it reduced obvious mojibake markers
+            if "Ã" in s or "â€" in s or "Â" in s:
+                return fixed
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            pass
+        return s
+
     def _clean_title(t: str) -> str:
         if not t:
             return ""
         # HTML-unescape (&amp; -> &, &#x27; -> ', etc.)
         t = unescape(t)
+        t = _fix_mojibake(t)
         # Strip common Spotify prefixes
         t = re.sub(r"^(Spotify Episode:\s*|Spotify Podcast:\s*)", "", t).strip()
         return t
@@ -486,7 +500,7 @@ def _fetch_spotify_meta(url: str) -> dict:
         if not show_name:
             show_name = "Spotify Podcast"
 
-        return {"title": title, "show_name": unescape(show_name)}
+        return {"title": title, "show_name": _fix_mojibake(unescape(show_name))}
 
     # Try ScraperAPI first (Spotify blocks cloud IPs)
     if SCRAPER_API_KEY:
