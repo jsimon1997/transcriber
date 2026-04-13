@@ -415,17 +415,20 @@ def _fetch_spotify_meta(url: str) -> dict:
     falls back to direct fetch.
     """
     def _fix_mojibake(s: str) -> str:
-        """Undo UTF-8 bytes mis-decoded as Latin-1 then re-encoded as UTF-8."""
+        """Undo UTF-8 bytes mis-decoded as Latin-1 then re-encoded as UTF-8,
+        plus targeted fixes for orphan mojibake chars that Spotify leaks."""
         if not s:
             return s
-        # Always attempt the round-trip; only keep it if it produced a valid
-        # string that differs (i.e., mojibake was present).
         try:
             fixed = s.encode("latin-1").decode("utf-8")
             if fixed != s:
-                return fixed
+                s = fixed
         except (UnicodeDecodeError, UnicodeEncodeError):
             pass
+        # Orphan â between letters → apostrophe (Spotify oEmbed mangles smart quotes)
+        s = re.sub(r"(\w)â(\w)", r"\1'\2", s)
+        # Standalone Ã, Â which are common mojibake leftovers
+        s = s.replace("Ã©", "é").replace("Ã¨", "è").replace("Ã ", "à")
         return s
 
     def _clean_title(t: str) -> str:
@@ -503,6 +506,24 @@ def _fetch_spotify_meta(url: str) -> dict:
 
         return {"title": title, "show_name": _fix_mojibake(unescape(show_name))}
 
+    # Strategy 0: Spotify oEmbed — public, fast, no proxy needed.
+    # Returns clean JSON with title + thumbnail. Does NOT include show name.
+    oembed_title = ""
+    oembed_thumb = ""
+    try:
+        oe = requests.get(
+            "https://open.spotify.com/oembed",
+            params={"url": url},
+            timeout=15,
+        )
+        if oe.ok:
+            j = oe.json()
+            oembed_title = _clean_title(j.get("title", ""))
+            oembed_thumb = j.get("thumbnail_url", "")
+            logger.info(f"oEmbed title: {oembed_title!r}")
+    except Exception as e:
+        logger.warning(f"Spotify oEmbed failed: {e}")
+
     # Try ScraperAPI first (Spotify blocks cloud IPs)
     if SCRAPER_API_KEY:
         try:
@@ -515,7 +536,12 @@ def _fetch_spotify_meta(url: str) -> dict:
             resp.raise_for_status()
             html = resp.content.decode("utf-8", errors="replace")
             meta = _extract_meta(html)
-            if meta["title"]:
+            # Prefer oEmbed title if we have one (cleaner encoding)
+            if oembed_title:
+                meta["title"] = oembed_title
+            if not meta.get("title") and oembed_title:
+                meta["title"] = oembed_title
+            if meta.get("title"):
                 return meta
             logger.warning("ScraperAPI returned empty Spotify metadata")
         except Exception as e:
@@ -527,9 +553,15 @@ def _fetch_spotify_meta(url: str) -> dict:
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
         }, timeout=15)
         resp.raise_for_status()
-        return _extract_meta(resp.content.decode("utf-8", errors="replace"))
+        meta = _extract_meta(resp.content.decode("utf-8", errors="replace"))
+        if oembed_title:
+            meta["title"] = oembed_title
+        return meta
     except Exception as e:
         logger.warning(f"Direct Spotify fetch failed: {e}")
+        # Last resort: at least return oEmbed title (show_name unknown)
+        if oembed_title:
+            return {"title": oembed_title, "show_name": "Spotify Podcast"}
         return {"title": "", "show_name": ""}
 
 
