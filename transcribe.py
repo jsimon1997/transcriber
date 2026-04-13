@@ -417,6 +417,8 @@ def _fetch_spotify_meta(url: str) -> dict:
     def _clean_title(t: str) -> str:
         if not t:
             return ""
+        # HTML-unescape (&amp; -> &, &#x27; -> ', etc.)
+        t = unescape(t)
         # Strip common Spotify prefixes
         t = re.sub(r"^(Spotify Episode:\s*|Spotify Podcast:\s*)", "", t).strip()
         return t
@@ -484,7 +486,7 @@ def _fetch_spotify_meta(url: str) -> dict:
         if not show_name:
             show_name = "Spotify Podcast"
 
-        return {"title": title, "show_name": show_name}
+        return {"title": title, "show_name": unescape(show_name)}
 
     # Try ScraperAPI first (Spotify blocks cloud IPs)
     if SCRAPER_API_KEY:
@@ -702,6 +704,7 @@ def transcribe_spotify(url: str) -> TranscriptResult:
     # Strategy 2: Find RSS feed audio → transcribe with AssemblyAI
     logger.info("Spotify strategy 2: RSS feed + AssemblyAI...")
     rss_info = _find_rss_audio(show_name, title)
+    assemblyai_error = ""
     if rss_info and ASSEMBLYAI_API_KEY:
         try:
             segments = _transcribe_audio_assemblyai(rss_info["audio_url"])
@@ -732,6 +735,7 @@ def transcribe_spotify(url: str) -> TranscriptResult:
                 )
         except Exception as e:
             logger.error(f"AssemblyAI transcription failed: {e}")
+            assemblyai_error = str(e)
 
     # Nothing worked
     errors = []
@@ -741,6 +745,8 @@ def transcribe_spotify(url: str) -> TranscriptResult:
         errors.append("RSS feed not found")
     elif not ASSEMBLYAI_API_KEY:
         errors.append("no ASSEMBLYAI_API_KEY for audio transcription")
+    elif assemblyai_error:
+        errors.append(f"AssemblyAI error: {assemblyai_error}")
 
     raise RuntimeError(
         f"Could not transcribe this Spotify episode.\n"
