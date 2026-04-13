@@ -425,9 +425,12 @@ def _fetch_spotify_meta(url: str) -> dict:
                 s = fixed
         except (UnicodeDecodeError, UnicodeEncodeError):
             pass
-        # Orphan â between letters → apostrophe (Spotify oEmbed mangles smart quotes)
-        s = re.sub(r"(\w)â(\w)", r"\1'\2", s)
-        # Standalone Ã, Â which are common mojibake leftovers
+        # Spotify leaks orphan â (U+00E2) where smart apostrophes should be,
+        # sometimes followed by invisible control bytes. Replace all.
+        s = s.replace("â", "'")
+        # Strip leftover control characters (0x80-0x9F, 0x00-0x1F except common whitespace)
+        s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", s)
+        # Common double-mojibake leftovers
         s = s.replace("Ã©", "é").replace("Ã¨", "è").replace("Ã ", "à")
         return s
 
