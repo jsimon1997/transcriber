@@ -541,6 +541,29 @@ class TranscribeRequest(BaseModel):
     url: str
 
 
+@app.get("/version")
+def version():
+    """Diagnostic — proves which code is actually running."""
+    from transcribe import _fetch_spotify_meta
+    # Test the mojibake fix path with synthetic input
+    test_input = "Anthropic" + chr(0x00E2) + chr(0x0080) + chr(0x0099) + "s"
+    # Inline the same logic as _final_clean
+    s = test_input
+    try:
+        fixed = s.encode("latin-1").decode("utf-8")
+        if fixed != s:
+            s = fixed
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        pass
+    s = s.replace("\u00e2", "'")
+    return {
+        "version": "mojibake-belt-suspenders-v2",
+        "test_input_hex": " ".join(f"{ord(c):04x}" for c in test_input),
+        "test_output_hex": " ".join(f"{ord(c):04x}" for c in s),
+        "test_output": s,
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return HTML

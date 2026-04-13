@@ -650,8 +650,9 @@ def _search_youtube(query: str, show_name: str = "", episode_title: str = "") ->
                     f"{best['channel']} — {best['title']}"
                 )
                 return f"https://www.youtube.com/watch?v={best['id']}"
-            # Accept strong title-only match as fallback (channel unknown)
-            if title_overlap >= max(needed_overlap + 1, 4):
+            # Strong title overlap fallback only allowed if NO show_name
+            # (with show_name we MUST channel-match to avoid wrong-podcast videos)
+            if not show_name and title_overlap >= max(needed_overlap + 1, 4):
                 logger.info(
                     f"YouTube match (strong title overlap {title_overlap}): "
                     f"{best['channel']} — {best['title']}"
@@ -807,10 +808,29 @@ def _parse_duration_text(text: str) -> float:
 
 
 def transcribe_spotify(url: str) -> TranscriptResult:
-    logger.info(f"Processing Spotify URL: {url}")
+    logger.info(f"Processing Spotify URL: {url} [v=mojibake-belt-suspenders]")
     meta = _fetch_spotify_meta(url)
     title = meta["title"]
     show_name = meta["show_name"]
+
+    # Belt-and-suspenders mojibake cleanup at the OUTERMOST point
+    # (in case _clean_title was bypassed somewhere)
+    def _final_clean(s: str) -> str:
+        if not s:
+            return s
+        try:
+            fixed = s.encode("latin-1").decode("utf-8")
+            if fixed != s:
+                s = fixed
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            pass
+        s = s.replace("\u00e2", "'")
+        s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", s)
+        return s
+
+    title = _final_clean(title)
+    show_name = _final_clean(show_name)
+    logger.info(f"After cleanup — title: {title!r}, show: {show_name!r}")
 
     if not title:
         raise ValueError(
