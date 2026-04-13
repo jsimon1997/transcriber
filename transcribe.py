@@ -517,8 +517,12 @@ def _fetch_spotify_meta(url: str) -> dict:
         return {"title": "", "show_name": ""}
 
 
-def _search_youtube(query: str) -> Optional[str]:
-    logger.info(f"Searching YouTube: {query!r}")
+def _search_youtube(query: str, show_name: str = "") -> Optional[str]:
+    """
+    Search YouTube. If show_name is provided, prefer results where the
+    channel name or video title contains the show name (fuzzy).
+    """
+    logger.info(f"Searching YouTube: {query!r} (show={show_name!r})")
     try:
         if SCRAPER_API_KEY:
             resp = requests.get("https://api.scraperapi.com/", params={
@@ -534,9 +538,63 @@ def _search_youtube(query: str) -> Optional[str]:
                 timeout=10,
             )
             html = resp.text
-        ids = re.findall(r'"videoId":"([A-Za-z0-9_-]{11})"', html)
-        if ids:
-            return f"https://www.youtube.com/watch?v={ids[0]}"
+
+        # Parse videoRenderer blocks from ytInitialData — gives us id+title+channel
+        # Each block loosely looks like: "videoRenderer":{"videoId":"...","title":{"runs":[{"text":"..."}]}, ..., "ownerText":{"runs":[{"text":"CHANNEL"}]}...}
+        candidates = []
+        for m in re.finditer(
+            r'"videoRenderer":\{"videoId":"([A-Za-z0-9_-]{11})".*?"title":\{"runs":\[\{"text":"([^"]+)"',
+            html,
+        ):
+            vid = m.group(1)
+            vtitle = m.group(2)
+            # Try to find channel name following this block
+            start = m.end()
+            chunk = html[start:start + 3000]
+            chan_m = re.search(r'"ownerText":\{"runs":\[\{"text":"([^"]+)"', chunk)
+            channel = chan_m.group(1) if chan_m else ""
+            candidates.append({"id": vid, "title": vtitle, "channel": channel})
+            if len(candidates) >= 15:
+                break
+
+        if not candidates:
+            # Fallback: just grab first videoId
+            ids = re.findall(r'"videoId":"([A-Za-z0-9_-]{11})"', html)
+            if ids:
+                return f"https://www.youtube.com/watch?v={ids[0]}"
+            return None
+
+        def _norm(s: str) -> str:
+            return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+        if show_name:
+            show_n = _norm(show_name)
+            # Try shorter token subsets for channel-name matching (e.g. "All-In with Chamath..." -> "allin")
+            show_tokens = [_norm(t) for t in re.split(r"\W+", show_name) if len(t) > 2]
+            for c in candidates:
+                chan_n = _norm(c["channel"])
+                if not chan_n:
+                    continue
+                if show_n and (show_n in chan_n or chan_n in show_n):
+                    logger.info(f"YouTube match by channel: {c['channel']} — {c['title']}")
+                    return f"https://www.youtube.com/watch?v={c['id']}"
+                # token overlap: at least 2 show tokens appear in channel name
+                hits = sum(1 for t in show_tokens if t and t in chan_n)
+                if hits >= 2:
+                    logger.info(f"YouTube match by tokens ({hits}): {c['channel']} — {c['title']}")
+                    return f"https://www.youtube.com/watch?v={c['id']}"
+
+        # No channel match — return first result, but log a warning
+        c0 = candidates[0]
+        logger.warning(
+            f"YouTube: no channel match for show={show_name!r}; "
+            f"first result is {c0['channel']!r} — {c0['title']!r}. "
+            f"Skipping to avoid wrong-video match."
+        )
+        # If we had a show_name and no channel matched, DON'T return a random video.
+        if show_name:
+            return None
+        return f"https://www.youtube.com/watch?v={c0['id']}"
     except Exception as e:
         logger.warning(f"YouTube search error: {e}")
     return None
@@ -692,7 +750,7 @@ def transcribe_spotify(url: str) -> TranscriptResult:
 
     # Strategy 1: Find on YouTube (fastest — uses existing captions)
     logger.info("Spotify strategy 1: search YouTube...")
-    yt_url = _search_youtube(f"{show_name} {title}")
+    yt_url = _search_youtube(f"{show_name} {title}", show_name=show_name)
     if yt_url:
         try:
             result = transcribe_youtube(yt_url)

@@ -146,3 +146,15 @@ def get_episode(episode_id: int) -> dict | None:
         if ep.get("id") == episode_id:
             return ep
     return None
+
+
+def delete_episode(episode_id: int) -> bool:
+    if not GITHUB_TOKEN:
+        return False
+    with _lock:
+        episodes, sha = _read_feed()
+        new_eps = [ep for ep in episodes if ep.get("id") != episode_id]
+        if len(new_eps) == len(episodes):
+            return False
+        _write_feed(new_eps, sha)
+        return True

@@ -108,7 +108,7 @@ def generate_insights(transcript: str, title: str, url: str) -> list[dict]:
 
 import re  # noqa: E402 — needed for generate_insights
 
-from db import init_db, save_episode, get_all_episodes, get_episode  # noqa: E402
+from db import init_db, save_episode, get_all_episodes, get_episode, delete_episode  # noqa: E402
 
 app = FastAPI(title="Transcriber")
 
@@ -638,6 +638,14 @@ def api_episode(episode_id: int):
     if not ep:
         return JSONResponse(status_code=404, content={"error": "Not found"})
     return ep
+
+
+@app.delete("/api/episode/{episode_id}")
+def api_delete_episode(episode_id: int):
+    ok = delete_episode(episode_id)
+    if not ok:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    return {"deleted": episode_id}
 
 
 FEED_HTML = """<!DOCTYPE html>
