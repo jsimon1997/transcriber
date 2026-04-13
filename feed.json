@@ -104,58 +104,5 @@
     "method": "yt-dlp",
     "video_date": "",
     "created_at": "2026-04-12T21:59:28.628843+00:00"
-  },
-  {
-    "id": 3,
-    "url": "https://open.spotify.com/episode/6lywn8r0CQua2HD05BwwH8",
-    "title": "Why Iran Refused Ceasefire? Israel Tensions Explained in 50 Seconds",
-    "source": "GEOGRAPHY BY MAPS",
-    "duration_minutes": 0.7,
-    "transcript": "Title: Why Iran Refused Ceasefire? Israel Tensions Explained in 50 Seconds\nSource: GEOGRAPHY BY MAPS\nDate: 2026-04-11\nDuration: 1 minutes\nURL: https://open.spotify.com/episode/6lywn8r0CQua2HD05BwwH8\n\n---\n\n[00:00:00] Why did Iran reject a ceasefire and even\n\n[00:00:02] as tensions exploded as conflict with\n\n[00:00:04] Israel intensified, the world expected\n\n[00:00:07] de-escalation, but Iran refused to back\n\n[00:00:09] down. Tehran said the ceasefire terms\n\n[00:00:12] were unfair\n\n[00:00:13] and heavily favored its rivals. At the\n\n[00:00:15] center of it all, the Strait of Hormuz,\n\n[00:00:19] a critical global oil lifeline.\n\n[00:00:21] Meanwhile, Israeli strikes continued,\n\n[00:00:23] keeping the region on edge. Iran\n\n[00:00:25] signaled it's prepared for a long\n\n[00:00:27] confrontation, not a quick compromise.\n\n[00:00:30] Decades of mistrust, power struggles,\n\n[00:00:32] and regional influence\n\n[00:00:34] >> [music]\n\n[00:00:34] >> fueled the standoff. This isn't just a\n\n[00:00:35] rejected ceasefire, it's a battle for\n\n[00:00:38] control of the Middle East.\n",
-    "insights": [
-      {
-        "headline": "Iran Rejected Ceasefire Due to Unfair Terms",
-        "bullets": [
-          "Tehran perceived the ceasefire agreement as heavily favoring its rivals rather than achieving balanced resolution.",
-          "Iran's refusal signals unwillingness to accept disadvantageous diplomatic outcomes despite international pressure for de-escalation."
-        ],
-        "timestamp": "00:00:09"
-      },
-      {
-        "headline": "Strait of Hormuz is Central to Conflict Dynamics",
-        "bullets": [
-          "The Strait of Hormuz functions as a critical global oil lifeline, making control of this waterway strategically vital.",
-          "Regional tensions directly threaten global energy security and economic stability through this chokepoint."
-        ],
-        "timestamp": "00:00:15"
-      },
-      {
-        "headline": "Iran Prepared for Prolonged Confrontation Strategy",
-        "bullets": [
-          "Tehran signaled readiness for a long-term standoff rather than seeking quick compromise or rapid resolution.",
-          "This strategic posture indicates Iran prioritizes sustained resistance over immediate diplomatic settlements."
-        ],
-        "timestamp": "00:00:25"
-      },
-      {
-        "headline": "Decades of Mistrust Fuel Regional Power Struggles",
-        "bullets": [
-          "Long-standing historical animosities and competing interests have created deep foundational mistrust between parties.",
-          "The conflict extends beyond immediate ceasefire negotiations to encompass broader battles for Middle Eastern influence and control."
-        ],
-        "timestamp": "00:00:32"
-      },
-      {
-        "headline": "Conflict Represents Battle for Middle East Dominance",
-        "bullets": [
-          "This standoff transcends a simple rejected ceasefire and reflects deeper geopolitical competition for regional supremacy.",
-          "Multiple actors are competing for control and influence across the Middle East, making simple resolution unlikely."
-        ],
-        "timestamp": "00:00:35"
-      }
-    ],
-    "method": "yt-dlp",
-    "video_date": "2026-04-11",
-    "created_at": "2026-04-13T23:18:12.308670+00:00"
   }
 ]
