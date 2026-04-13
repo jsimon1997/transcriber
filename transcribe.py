@@ -498,8 +498,8 @@ def _fetch_spotify_meta(url: str) -> dict:
                 timeout=30,
             )
             resp.raise_for_status()
-            resp.encoding = "utf-8"  # ScraperAPI often omits charset header
-            meta = _extract_meta(resp.text)
+            html = resp.content.decode("utf-8", errors="replace")
+            meta = _extract_meta(html)
             if meta["title"]:
                 return meta
             logger.warning("ScraperAPI returned empty Spotify metadata")
@@ -512,8 +512,7 @@ def _fetch_spotify_meta(url: str) -> dict:
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
         }, timeout=15)
         resp.raise_for_status()
-        resp.encoding = "utf-8"
-        return _extract_meta(resp.text)
+        return _extract_meta(resp.content.decode("utf-8", errors="replace"))
     except Exception as e:
         logger.warning(f"Direct Spotify fetch failed: {e}")
         return {"title": "", "show_name": ""}
@@ -531,8 +530,7 @@ def _search_youtube(query: str, show_name: str = "") -> Optional[str]:
                 "api_key": SCRAPER_API_KEY,
                 "url": f"https://www.youtube.com/results?search_query={requests.utils.quote(query)}",
             }, timeout=60)
-            resp.encoding = "utf-8"
-            html = resp.text
+            html = resp.content.decode("utf-8", errors="replace")
         else:
             resp = requests.get(
                 "https://www.youtube.com/results",
