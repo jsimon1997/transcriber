@@ -570,6 +570,58 @@ def transcribe(req: TranscribeRequest):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+# ---------------------------------------------------------------------------
+# Async job system — for long Spotify/AssemblyAI transcriptions that would
+# otherwise time out the HTTP request behind HF Spaces' edge proxy.
+# ---------------------------------------------------------------------------
+
+import uuid
+import threading
+
+_jobs: dict = {}
+_jobs_lock = threading.Lock()
+
+
+def _run_job(job_id: str, url: str):
+    try:
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "transcribing"
+        result = transcribe_url(url)
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "generating_insights"
+            _jobs[job_id]["title"] = result.get("title", "")
+        insights = generate_insights(result["transcript"], result["title"], result["url"])
+        result["insights"] = insights
+        ep_id = save_episode(result, insights)
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "done"
+            _jobs[job_id]["episode_id"] = ep_id
+            _jobs[job_id]["title"] = result["title"]
+    except Exception as e:
+        logger.error(f"Job {job_id} failed: {e}", exc_info=True)
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "error"
+            _jobs[job_id]["error"] = str(e)
+
+
+@app.post("/transcribe-async")
+def transcribe_async(req: TranscribeRequest):
+    job_id = uuid.uuid4().hex
+    with _jobs_lock:
+        _jobs[job_id] = {"status": "queued", "url": req.url}
+    threading.Thread(target=_run_job, args=(job_id, req.url), daemon=True).start()
+    return {"job_id": job_id}
+
+
+@app.get("/job/{job_id}")
+def job_status(job_id: str):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        return JSONResponse(status_code=404, content={"error": "job not found"})
+    return job
+
+
 
 # ---------------------------------------------------------------------------
 # Feed API + page
@@ -1021,25 +1073,51 @@ async function addPodcast() {
 
   btn.disabled = true;
   spinner.style.display = 'block';
-  statusText.textContent = 'Transcribing... (may take a few minutes)';
+  statusText.textContent = 'Starting...';
   statusEl.className = '';
 
+  const statusMessages = {
+    queued: 'Queued...',
+    transcribing: 'Transcribing audio... (Spotify episodes can take 5-10 min)',
+    generating_insights: 'Generating AI insights...',
+    done: 'Added! Refreshing feed...',
+    error: 'Failed',
+  };
+
   try {
-    const resp = await fetch('/transcribe', {
+    const resp = await fetch('/transcribe-async', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url }),
     });
-    const data = await resp.json();
-    if (!resp.ok || data.error) {
-      statusText.textContent = data.error || 'Unknown error.';
+    const { job_id, error } = await resp.json();
+    if (!resp.ok || error || !job_id) {
+      statusText.textContent = error || 'Could not start job.';
       statusEl.className = 'error';
-    } else {
-      statusText.textContent = 'Added! Refreshing feed...';
-      document.getElementById('add-url').value = '';
-      await loadFeed();
-      statusText.textContent = '';
+      return;
     }
+
+    // Poll every 3 seconds, up to 20 minutes
+    const deadline = Date.now() + 20 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 3000));
+      const s = await fetch('/job/' + job_id).then(r => r.json()).catch(() => ({status: 'polling_error'}));
+      const label = statusMessages[s.status] || s.status;
+      statusText.textContent = label + (s.title ? ' — ' + s.title : '');
+      if (s.status === 'done') {
+        document.getElementById('add-url').value = '';
+        await loadFeed();
+        statusText.textContent = '';
+        return;
+      }
+      if (s.status === 'error') {
+        statusText.textContent = s.error || 'Unknown error.';
+        statusEl.className = 'error';
+        return;
+      }
+    }
+    statusText.textContent = 'Timed out after 20 minutes.';
+    statusEl.className = 'error';
   } catch(e) {
     statusText.textContent = 'Failed: ' + e.message;
     statusEl.className = 'error';
