@@ -418,10 +418,11 @@ def _fetch_spotify_meta(url: str) -> dict:
         """Undo UTF-8 bytes mis-decoded as Latin-1 then re-encoded as UTF-8."""
         if not s:
             return s
+        # Always attempt the round-trip; only keep it if it produced a valid
+        # string that differs (i.e., mojibake was present).
         try:
             fixed = s.encode("latin-1").decode("utf-8")
-            # Only use if it reduced obvious mojibake markers
-            if "Ã" in s or "â€" in s or "Â" in s:
+            if fixed != s:
                 return fixed
         except (UnicodeDecodeError, UnicodeEncodeError):
             pass
@@ -537,6 +538,9 @@ def _search_youtube(query: str, show_name: str = "") -> Optional[str]:
     Search YouTube. If show_name is provided, prefer results where the
     channel name or video title contains the show name (fuzzy).
     """
+    # Normalize query — drop non-ASCII (smart quotes, mojibake) and collapse spaces
+    query = re.sub(r"[^\w\s&$]", " ", query, flags=re.ASCII)
+    query = re.sub(r"\s+", " ", query).strip()
     logger.info(f"Searching YouTube: {query!r} (show={show_name!r})")
     try:
         if SCRAPER_API_KEY:
