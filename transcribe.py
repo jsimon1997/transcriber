@@ -533,10 +533,11 @@ def _fetch_spotify_meta(url: str) -> dict:
         return {"title": "", "show_name": ""}
 
 
-def _search_youtube(query: str, show_name: str = "") -> Optional[str]:
+def _search_youtube(query: str, show_name: str = "", episode_title: str = "") -> Optional[str]:
     """
     Search YouTube. If show_name is provided, prefer results where the
-    channel name or video title contains the show name (fuzzy).
+    channel name matches. Additionally, require the video title to share
+    significant words with the episode title (if given).
     """
     # Normalize query — drop non-ASCII (smart quotes, mojibake) and collapse spaces
     query = re.sub(r"[^\w\s&$]", " ", query, flags=re.ASCII)
@@ -583,37 +584,52 @@ def _search_youtube(query: str, show_name: str = "") -> Optional[str]:
                 return f"https://www.youtube.com/watch?v={ids[0]}"
             return None
 
-        def _norm(s: str) -> str:
-            return re.sub(r"[^a-z0-9]+", "", s.lower())
+        def _tokens(s: str) -> set:
+            # Lowercase ASCII-alphanum tokens, length >= 3, excluding stopwords
+            stop = {"the", "and", "for", "with", "from", "this", "that", "has",
+                    "are", "was", "not", "but", "you", "all", "how", "why",
+                    "what", "when", "who", "new", "episode", "podcast", "show"}
+            toks = re.findall(r"[a-z0-9]{3,}", s.lower())
+            return {t for t in toks if t not in stop}
 
-        if show_name:
-            show_n = _norm(show_name)
-            # Try shorter token subsets for channel-name matching (e.g. "All-In with Chamath..." -> "allin")
-            show_tokens = [_norm(t) for t in re.split(r"\W+", show_name) if len(t) > 2]
-            for c in candidates:
-                chan_n = _norm(c["channel"])
-                if not chan_n:
-                    continue
-                if show_n and (show_n in chan_n or chan_n in show_n):
-                    logger.info(f"YouTube match by channel: {c['channel']} — {c['title']}")
-                    return f"https://www.youtube.com/watch?v={c['id']}"
-                # token overlap: at least 2 show tokens appear in channel name
-                hits = sum(1 for t in show_tokens if t and t in chan_n)
-                if hits >= 2:
-                    logger.info(f"YouTube match by tokens ({hits}): {c['channel']} — {c['title']}")
-                    return f"https://www.youtube.com/watch?v={c['id']}"
+        ep_toks = _tokens(episode_title) if episode_title else set()
+        show_toks = _tokens(show_name) if show_name else set()
 
-        # No channel match — return first result, but log a warning
-        c0 = candidates[0]
-        logger.warning(
-            f"YouTube: no channel match for show={show_name!r}; "
-            f"first result is {c0['channel']!r} — {c0['title']!r}. "
-            f"Skipping to avoid wrong-video match."
-        )
-        # If we had a show_name and no channel matched, DON'T return a random video.
-        if show_name:
+        def score(c: dict) -> tuple:
+            vt = _tokens(c["title"])
+            ct = _tokens(c["channel"])
+            title_overlap = len(ep_toks & vt)
+            channel_match = len(show_toks & ct) >= max(1, min(2, len(show_toks)))
+            return (channel_match, title_overlap)
+
+        if episode_title or show_name:
+            scored = sorted(candidates, key=score, reverse=True)
+            best = scored[0]
+            s = score(best)
+            channel_match, title_overlap = s
+            # Require at least some real signal
+            needed_overlap = max(2, min(4, len(ep_toks) // 2)) if ep_toks else 0
+            if channel_match and title_overlap >= needed_overlap:
+                logger.info(
+                    f"YouTube match (channel+{title_overlap} title-tokens): "
+                    f"{best['channel']} — {best['title']}"
+                )
+                return f"https://www.youtube.com/watch?v={best['id']}"
+            # Accept strong title-only match as fallback (channel unknown)
+            if title_overlap >= max(needed_overlap + 1, 4):
+                logger.info(
+                    f"YouTube match (strong title overlap {title_overlap}): "
+                    f"{best['channel']} — {best['title']}"
+                )
+                return f"https://www.youtube.com/watch?v={best['id']}"
+            logger.warning(
+                f"YouTube: no confident match (best: channel_match={channel_match}, "
+                f"overlap={title_overlap}, needed={needed_overlap}, "
+                f"title={best['title']!r}, channel={best['channel']!r})"
+            )
             return None
-        return f"https://www.youtube.com/watch?v={c0['id']}"
+
+        return f"https://www.youtube.com/watch?v={candidates[0]['id']}"
     except Exception as e:
         logger.warning(f"YouTube search error: {e}")
     return None
@@ -769,7 +785,7 @@ def transcribe_spotify(url: str) -> TranscriptResult:
 
     # Strategy 1: Find on YouTube (fastest — uses existing captions)
     logger.info("Spotify strategy 1: search YouTube...")
-    yt_url = _search_youtube(f"{show_name} {title}", show_name=show_name)
+    yt_url = _search_youtube(f"{show_name} {title}", show_name=show_name, episode_title=title)
     if yt_url:
         try:
             result = transcribe_youtube(yt_url)
