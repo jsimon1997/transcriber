@@ -414,26 +414,75 @@ def _fetch_spotify_meta(url: str) -> dict:
     Uses ScraperAPI if available (Spotify blocks direct access from cloud IPs),
     falls back to direct fetch.
     """
+    def _clean_title(t: str) -> str:
+        if not t:
+            return ""
+        # Strip common Spotify prefixes
+        t = re.sub(r"^(Spotify Episode:\s*|Spotify Podcast:\s*)", "", t).strip()
+        return t
+
     def _extract_meta(html: str) -> dict:
         def og(prop):
             m = re.search(rf'<meta property="og:{prop}" content="([^"]+)"', html)
             return m.group(1) if m else ""
 
-        title = og("title")
-        show_name = og("site_name") or "Spotify Podcast"
+        def meta_name(name):
+            m = re.search(rf'<meta name="{name}" content="([^"]+)"', html)
+            return m.group(1) if m else ""
 
-        # Also try ld+json for richer metadata
-        ld_match = re.search(
-            r'<script type="application/ld\+json">(.*?)</script>', html, re.DOTALL
-        )
-        if ld_match:
+        title = _clean_title(og("title"))
+        show_name = ""
+
+        # Method 1: parse ALL ld+json blocks — find the PodcastEpisode one
+        for ld_match in re.finditer(
+            r'<script type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL
+        ):
             try:
                 data = json.loads(ld_match.group(1))
-                title = data.get("name", title)
-                if "partOfSeries" in data:
-                    show_name = data["partOfSeries"].get("name", show_name)
+                if isinstance(data, list):
+                    candidates = data
+                else:
+                    candidates = [data]
+                for d in candidates:
+                    if not isinstance(d, dict):
+                        continue
+                    t = d.get("@type", "")
+                    if "PodcastEpisode" in str(t) or "Episode" in str(t):
+                        if d.get("name"):
+                            title = _clean_title(d["name"])
+                        pos = d.get("partOfSeries") or {}
+                        if isinstance(pos, dict) and pos.get("name"):
+                            show_name = pos["name"]
+                        elif isinstance(pos, list) and pos:
+                            show_name = pos[0].get("name", "")
             except Exception:
-                pass
+                continue
+
+        # Method 2: parse the description meta tag
+        # Spotify usually sets: "Listen to this episode from SHOWNAME on Spotify. ..."
+        if not show_name:
+            desc = meta_name("description") or og("description")
+            m = re.match(r"Listen to this episode from (.+?) on Spotify", desc)
+            if m:
+                show_name = m.group(1).strip()
+
+        # Method 3: look for music:album or show link
+        if not show_name:
+            show_link = og("music:album") or meta_name("music:album")
+            if "/show/" in show_link:
+                # Try to find the show's title in the HTML near that URL
+                show_id_match = re.search(r"/show/([A-Za-z0-9]+)", show_link)
+                if show_id_match:
+                    sid = show_id_match.group(1)
+                    show_title_match = re.search(
+                        rf'"show"\s*:\s*{{[^}}]*"id"\s*:\s*"{sid}"[^}}]*"name"\s*:\s*"([^"]+)"',
+                        html,
+                    )
+                    if show_title_match:
+                        show_name = show_title_match.group(1)
+
+        if not show_name:
+            show_name = "Spotify Podcast"
 
         return {"title": title, "show_name": show_name}
 
